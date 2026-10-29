@@ -5,9 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0]
 
 ### Added
+
+- Multi-agent orchestration under the cosh TUI: external ACP agents and
+  nested cosh agents working side by side with the main chat, addressed and
+  coordinated as one workspace.
+
+  - The `/agents` split. A multi-select picker over the ACP harness
+    registry (plus a synthetic cosh manager entry) divides the chat area
+    into one pane per chosen agent, and a single shared prompt fans out to
+    all of them at once. Every pane carries the session's interaction
+    contract — per-pane scroll with sticky-bottom semantics, selection
+    copy, focused dispatch, the chat's message actions, a mirrored
+    sent-prompt box and the shared scroll-to-bottom pill — and the mode
+    adds its own controls: a pane maximizes to take the whole area while
+    the others keep running, hides with Backspace and restores with
+    Ctrl+Z, and focusing a pane probes the agent's harness live to bring
+    its own slash commands and session configuration boxes (model,
+    provider, reasoning, mode) into the pane. The main agent mirrors
+    itself in the Right Panel while the split is up, and adding or
+    removing panes no longer kills the turns already running.
+
+  - Persistent pane sessions and lifecycle. Each pane binds to its own
+    resumable ACP session at the end of its first turn and rehydrates from
+    the agent's session/load replay across app restarts (chat, reasoning
+    and model pick included). The user's Build/Ask mode choice is mapped
+    onto the closest advertised session mode at the start of every turn,
+    each pane's ACP budget shows in its header, the focused pane's serving
+    triple (provider, model, reasoning) shows on the prompt badge, and
+    model selection is per pane — `/models` on a focused pane commits to
+    that pane only, survives
+    restarts through the session's own markers, and the last model picked
+    for each agent is remembered across pane sessions, so a fresh pane no
+    longer lands on the harness default (often a paid-tier model).
+
+  - Coordination through the main agent. The main agent reaches the panes
+    with the `agents_call` tool — blocking on the pane's report or parking
+    it in the background with a requester-tagged receipt — and the
+    `agents_compact` tool asks for one pane's context to be compacted
+    ahead of the harness's 80% trigger. Every pane is told who it shares
+    the workspace with through a peer preamble refreshed when the pane set
+    changes; panes never coordinate themselves — coordination tooling is
+    stripped from their loops and they only report.
+
+  - Opt-in worktree isolation. Any pane — and the main agent itself — can
+    work in its own git worktree instead of the shared checkout. cosh
+    adopts existing worktrees and lists them, resolves explicit paths,
+    refuses to run two agents in one checkout, quotes paths with spaces,
+    and the main agent's isolation carries an exit path back to the shared
+    checkout.
 
 - Automatic hang detection for the bash tool (`bash_run`). A liveness
   watchdog samples the executed command's whole process tree — bash spawns
@@ -30,8 +78,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process group and the PTY path already makes it a session leader —
   instead of killing only the shell. The old behavior leaked CPU-burning
   grandchildren that never touch the output pipes again (a leaked
-  `yes >/dev/null` spins a core forever). On Windows the kill remains
-  child-only (`TerminateProcess`).
+  `yes >/dev/null` spins a core forever). On Windows the whole tree dies
+  too: the killer walks fresh process snapshots from the root down and
+  ends every descendant with a batched `taskkill` call (Windows has no
+  process groups).
+
+- An effective-context toggle that keeps the full model window. Discovered
+  model windows are no longer always shrunk to the reduced sweet-spot
+  budget: the new `effective_context` switch in Settings under Models and
+  caching decides whether a discovered window is resized or used as-is, so
+  a 1M model stays 1M unless the user opts into the reduction.
+
+- Dynamic ACP and LLM provider registration. The built-in ACP harness
+  registry gains GitHub Copilot CLI and Qwen Code, and users can register
+  their own ACP agents (single-word name, launch line) and custom LLM
+  providers (endpoint URL plus API family; OpenAI-compatible today) in
+  `setup.json` through a registration form in Settings > Integrations.
+  Registration is validated all-or-nothing, and a rotted entry cannot
+  disable the working harnesses at startup.
+
+- The subagent right-panel view reworked around per-call windows. Parallel
+  calls of the same agent CLI no longer cross-pair: every subagent-bearing
+  event carries a per-call routing identity, so each call's prompt echo,
+  stream, report and failure land in its own window, and a straggler event
+  for a completed window is dropped instead of spilling into a sibling.
+  Windows read as chats now — the main agent's prompt echoes verbatim, the
+  finished window seals its full transcript (reasoning, tool rows,
+  narration) instead of being wiped, and edit diffs and tool names render
+  for real. `subagent_call` takes a `description` shown in the list entry,
+  and `Ctrl+Alt+L` toggles the list from anywhere.
+
+- The computer toolset's last major surface: window management. The new
+  `ComputerWindows` tool lists an app's windows (title, class, bounds,
+  state) or performs one native verb — activate, minimize, maximize,
+  fullscreen, restore, close, move or resize — through the OS window
+  manager. Key holds land as standalone `hold`/`release` steps in the act
+  and control pipelines, and waits gain `value`/`value_contains` (block
+  until an element's value matches) and app-scoped event waits
+  (window_opened, menu_closed, announcement…), replacing poll loops.
+
+- Termination tuning: the decision checkup's confidence floor moves from
+  0.6 to 0.75 — the measured optimum of a sweep over the termination corpus
+  (23/24 correct, zero false continues) — and the harness now instructs the
+  agent to open its final response with an explicit completion phrase, with
+  a stop veto injecting a bare "continue" instead of coaching the model to
+  finish remaining work (coaching confirmed a state the model could never
+  disprove and looped forever).
+
+- A `/spinner` picker: five styles for the agent-loop spinner — Bass
+  (equalizer with a kick beat, the default), Runes, Opencode (direct port
+  of the Knight-Rider scanner, 40 ms), Crush (direct port of crush's anim
+  package, HCL gradient, 20 fps) and the classic braille wheel — persisted
+  as `appearance.spinner` in `setup.json`. AnySpinner dispatches the shared
+  surface, so the agent loop never learns the chosen style.
 
 ### Removed
 
@@ -340,7 +439,7 @@ The agent's building blocks are published as reusable libraries:
 - Linux and Windows are tested. macOS builds are published but untested —
   report any issues with details.
 
-[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.4...HEAD
+[0.2.0]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.4...HEAD
 [0.1.4]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...v0.1.2
