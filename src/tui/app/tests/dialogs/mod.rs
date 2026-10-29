@@ -1,3 +1,4 @@
+mod agent_config;
 mod confirm;
 mod message_actions;
 mod provider_key;

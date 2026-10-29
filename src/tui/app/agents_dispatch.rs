@@ -1366,18 +1366,15 @@ impl App {
                         // registry default (e.g. a working free model where
                         // the harness's default is a paid-tier login wall)
                         // still apply.
-                        p.config_options
-                            .as_ref()
-                            .map(|opts| {
-                                opts.iter()
-                                    .filter(|o| {
-                                        !o.current.is_empty()
-                                            && p.picked_config_ids.iter().any(|id| id == &o.id)
-                                    })
-                                    .map(|o| (o.id.clone(), o.current.clone()))
-                                    .collect::<Vec<(String, String)>>()
-                            })
-                            .unwrap_or_default(),
+                        // The picks ride in precedence order (see
+                        // [`pane_turn_picks`]): the pane's own user pick
+                        // first, then the persisted per-agent pick, and the
+                        // registry default still applies when neither exists.
+                        pane_turn_picks(
+                            p.config_options.as_deref(),
+                            &p.picked_config_ids,
+                            self.agents_model_picks.get(&p.agent),
+                        ),
                         // The pane's EFFECTIVE cwd: the worktree path when
                         // the pane is pinned (`/worktree`), the session's
                         // working directory otherwise. Every layer of the
@@ -2697,6 +2694,82 @@ fn pane_handoff_summary(timeline: &[SubagentTimelineEntry]) -> String {
         .join("\n")
 }
 
+/// The pane option the MODEL surface rides, resolved the way every other
+/// site resolves it: `match_option`'s TWO-PASS `ByCategory("model")` — an
+/// option whose id is `model` wins first, and only when no such id exists
+/// does the category field decide. A flat per-element OR is WRONG here:
+/// cline categorizes BOTH its `provider` and its `model` options as
+/// `model`, so an OR would treat a provider pick as the agent's model —
+/// writing the store from the provider box and seeding a model value
+/// under `provider`. Resolving through `match_option` (the same call the
+/// config boxes make) keeps the confirm-time write, the dispatch-time
+/// seed and the badge seed agreeing BY CONSTRUCTION: the option the user
+/// picked in the model box is exactly the option the seed targets.
+/// Returns the option's OWN id — the pick must ride the id the harness
+/// advertises (`apply_session_picks` matches against the advertised
+/// list).
+pub(in crate::app) fn model_option_id(
+    options: &[cosh_tools::subagent::events::AgentConfigOption],
+) -> Option<&str> {
+    crate::routes::session::agent_command_map::match_option(
+        options,
+        crate::routes::session::agent_command_map::ConfigTarget::ByCategory("model"),
+    )
+    .map(|o| o.id.as_str())
+}
+
+/// The turn's config picks, in precedence order: the pane's own USER picks
+/// (the config-box confirm wrote the option's current and recorded its id)
+/// first, then the persisted per-agent model pick — the CLI-parity "remember
+/// my last model". A freshly created pane carries no picks of its own, while
+/// an agent's native CLI reuses the last chosen model for every NEW session;
+/// the persisted record restores that behavior (the headless ACP harness
+/// never runs the interactive layer that would remember it itself). The
+/// registry default still applies when neither exists: `acp::call` injects
+/// `entry.model` only into a model-less pick set. A persisted model the
+/// harness no longer offers is skipped inside `apply_session_picks` — it
+/// degrades to the harness default instead of failing the turn. Pure —
+/// unit-tested against the exact pick list the dispatch sends into
+/// `acp::call`.
+fn pane_turn_picks(
+    config_options: Option<&[cosh_tools::subagent::events::AgentConfigOption]>,
+    picked_config_ids: &[String],
+    persisted_model: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut picks = config_options
+        .map(|opts| {
+            opts.iter()
+                .filter(|o| !o.current.is_empty() && picked_config_ids.iter().any(|id| id == &o.id))
+                .map(|o| (o.id.clone(), o.current.clone()))
+                .collect::<Vec<(String, String)>>()
+        })
+        .unwrap_or_default();
+    // The persisted pick seeds under the MODEL option's OWN id — a harness
+    // that names the option differently but tags the category only honors a
+    // pick carrying ITS id (`apply_session_picks` matches against the
+    // advertised list). No model option advertised at all: fall back to the
+    // canonical `model` id (the pick is then skipped as unadvertised,
+    // degrading to the harness default exactly as designed). The suppression
+    // check compares against that SAME seed id, not a hard-coded `model`:
+    // the pane's own pick suppresses the seed whichever way the harness
+    // names the option (both picks would carry one id, and the later —
+    // persisted — one would win in `apply_session_picks`, overriding the
+    // user's fresher choice). It still runs against the OUTPUT picks (not
+    // `picked_config_ids`): a pane whose option list lost the model option
+    // entirely must still get its persisted pick applied rather than
+    // wrongly suppressed.
+    if let Some(model) = persisted_model {
+        let seed_id = config_options
+            .and_then(model_option_id)
+            .unwrap_or("model")
+            .to_string();
+        if !picks.iter().any(|(id, _)| id == &seed_id) {
+            picks.push((seed_id, model.to_string()));
+        }
+    }
+    picks
+}
+
 /// A pane's EFFECTIVE working directory — the ONE resolution every
 /// consumer reads: the worktree path when the pane is pinned (`/worktree`),
 /// the session's working directory otherwise. The ACP turn's
@@ -3408,6 +3481,122 @@ fn persist_manager_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The turn picks' precedence contract: the pane's own user picks ride
+    /// first; a persisted per-agent model pick seeds ONLY when the pane has
+    /// none (a fresh pane), and the absence of both leaves the pick set
+    /// model-less so the registry default still applies.
+    #[test]
+    fn pane_turn_picks_precedence() {
+        use cosh_tools::subagent::events::AgentConfigOption;
+
+        let model = AgentConfigOption {
+            id: "model".to_string(),
+            name: "Model".to_string(),
+            description: None,
+            category: Some("model".to_string()),
+            values: Vec::new(),
+            current: "pane-picked".to_string(),
+            boolean: None,
+        };
+        let reasoning = AgentConfigOption {
+            id: "reasoning".to_string(),
+            name: "Reasoning".to_string(),
+            description: None,
+            category: Some("thought_level".to_string()),
+            values: Vec::new(),
+            current: "high".to_string(),
+            boolean: None,
+        };
+        let untouched = AgentConfigOption {
+            id: "provider".to_string(),
+            name: "Provider".to_string(),
+            description: None,
+            category: None,
+            values: Vec::new(),
+            current: "harness-current".to_string(),
+            boolean: None,
+        };
+
+        // A fresh pane (no picked ids) gets the persisted pick seeded.
+        let picked = vec![];
+        let picks = pane_turn_picks(Some(&[model.clone(), untouched.clone()]), &picked, Some("persisted-model"));
+        assert_eq!(
+            picks,
+            vec![("model".to_string(), "persisted-model".to_string())],
+            "a fresh pane rides the persisted per-agent pick"
+        );
+
+        // The pane's OWN pick wins over the persisted one.
+        let picks = pane_turn_picks(
+            Some(&[model.clone(), reasoning.clone()]),
+            &["model".to_string(), "reasoning".to_string()],
+            Some("persisted-model"),
+        );
+        assert_eq!(
+            picks,
+            vec![
+                ("model".to_string(), "pane-picked".to_string()),
+                ("reasoning".to_string(), "high".to_string()),
+            ],
+            "the pane's user pick precedes the persisted one and suppresses the seed"
+        );
+
+        // No pane picks and no persisted pick: the set stays EMPTY (the
+        // registry default in `acp::call` still applies).
+        let picks = pane_turn_picks(Some(std::slice::from_ref(&untouched)), &[], None);
+        assert!(picks.is_empty(), "untouched options ride no picks");
+
+        // No config options at all (the pane never saw a report): the
+        // persisted pick still seeds.
+        let picks = pane_turn_picks(None, &[], Some("persisted-model"));
+        assert_eq!(
+            picks,
+            vec![("model".to_string(), "persisted-model".to_string())]
+        );
+    }
+
+    /// A harness that names the model option differently but tags the
+    /// category: the seed rides the option's REAL id, and the pane's own
+    /// pick of that same option suppresses the seed — the id comparison,
+    /// not a hard-coded `model`, is what keeps the user's fresher choice
+    /// from being overridden by the persisted record in
+    /// `apply_session_picks`.
+    #[test]
+    fn pane_turn_picks_seed_suppression_matches_the_option_id() {
+        use cosh_tools::subagent::events::AgentConfigOption;
+
+        let renamed = AgentConfigOption {
+            id: "session_model".to_string(),
+            name: "Model".to_string(),
+            description: None,
+            category: Some("model".to_string()),
+            values: Vec::new(),
+            current: "pane-picked".to_string(),
+            boolean: None,
+        };
+
+        // The seed rides the option's own id.
+        let picks =
+            pane_turn_picks(Some(std::slice::from_ref(&renamed)), &[], Some("persisted-model"));
+        assert_eq!(
+            picks,
+            vec![("session_model".to_string(), "persisted-model".to_string())],
+            "a differently-named model option seeds under its own id"
+        );
+
+        // The pane's own pick of that option suppresses the seed.
+        let picks = pane_turn_picks(
+            Some(std::slice::from_ref(&renamed)),
+            &["session_model".to_string()],
+            Some("persisted-model"),
+        );
+        assert_eq!(
+            picks,
+            vec![("session_model".to_string(), "pane-picked".to_string())],
+            "the pane's own pick suppresses the seed by id, not by the canonical name"
+        );
+    }
 
     fn tl_user(text: &str) -> SubagentTimelineEntry {
         SubagentTimelineEntry::UserMessage {

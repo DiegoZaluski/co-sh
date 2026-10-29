@@ -380,9 +380,84 @@ impl App {
                     } else if let SubagentEvent::ConfigOptions { options } = &event {
                         // Pane chrome like `SessionModel`: the config options
                         // cache on the pane (the standardized config boxes
-                        // the mapped command groups open read it).
+                        // the mapped command groups open read it). The model
+                        // option's `current` is the HARNESS default — every
+                        // fresh connection reports it regardless of the
+                        // persisted pick — so the persisted per-agent pick is
+                        // seeded OVER it: the box's selected dot and the
+                        // badge must show the model that will actually serve
+                        // the turn (dispatch seeds the same pick; this keeps
+                        // the visible truth aligned with it). A pick the
+                        // option's own value list no longer offers is left
+                        // out: the harness dropped that model, and a stale
+                        // badge would lie about the serving default. Seeding
+                        // is unconditional — a real `session/new` reports the
+                        // harness default as a NON-empty `current`, so guarding
+                        // on emptiness would skip the seed and the dot would
+                        // show the default instead of the persisted pick.
+                        // Every user confirm rewrites the store, so the
+                        // persisted record always IS the user's freshest
+                        // choice — except on a SIBLING pane of the same
+                        // agent: there the pane's own confirm recorded a
+                        // pane-local pick (`picked_config_ids`) that
+                        // dispatch serves, so the seed must not stomp it
+                        // (the same precedence `pane_turn_picks` applies).
                         if let Some(split) = target {
-                            split.set_agent_config_options(pane, options.clone());
+                            let mut options = options.clone();
+                            // The model option's id, resolved the SAME
+                            // two-pass way dispatch resolves it
+                            // (`model_option_id`): cline carries BOTH a
+                            // provider and a model option under category
+                            // `model`, and a flat id-or-category scan would
+                            // seed the provider option's badge.
+                            let model_id =
+                                super::agents_dispatch::model_option_id(&options)
+                                    .map(str::to_string);
+                            if let Some(p) = split.panes.get(pane) {
+                                // The seed value in precedence order — the
+                                // same order `pane_turn_picks` applies: the
+                                // pane's OWN pick (its cached current, when
+                                // it confirmed this very option) outranks
+                                // the global record. A sibling pane's
+                                // confirm rewrote the store; seeding that
+                                // record over THIS pane's fresher choice
+                                // would show a dot the turn will not serve.
+                                // When the pane's pick is missing from the
+                                // cache or the value list, the seed falls
+                                // through (empty current filters out of the
+                                // output picks in dispatch, so the persisted
+                                // record; a dropped value skips the seed and
+                                // the dot shows what the turn will really
+                                // serve) — display and dispatch stay aligned.
+                                let pane_picked_current = model_id
+                                    .as_ref()
+                                    .filter(|id| {
+                                        p.picked_config_ids.iter().any(|picked| picked == *id)
+                                    })
+                                    .and_then(|id| {
+                                        p.config_options
+                                            .as_ref()
+                                            .and_then(|opts| opts.iter().find(|o| &o.id == id))
+                                            .map(|o| o.current.clone())
+                                    })
+                                    .filter(|current| !current.is_empty());
+                                let persisted = self
+                                    .agents_model_picks
+                                    .get(&p.agent)
+                                    .map(str::to_string);
+                                if let Some(seed) = pane_picked_current.or(persisted)
+                                    && let Some(model_id) = model_id.as_deref()
+                                    && let Some(option) =
+                                        options.iter_mut().find(|o| o.id == model_id)
+                                    && option
+                                        .values
+                                        .iter()
+                                        .any(|v| v.value == seed)
+                                {
+                                    option.current = seed;
+                                }
+                            }
+                            split.set_agent_config_options(pane, options);
                         }
                     } else if let SubagentEvent::Modes { modes, current } = &event {
                         // Pane chrome like `SessionModel`: the advertised

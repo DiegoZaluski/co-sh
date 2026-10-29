@@ -40,6 +40,7 @@
 //! | `qwen` | `qwen --acp` |
 
 pub mod acp;
+pub mod model_picks;
 /// Brand palettes of the supported ACP sub-agents, for the TUI to paint
 /// each agent with its own logo colors. Pure RGB triples, no TUI
 /// dependency — see [`palette`].
