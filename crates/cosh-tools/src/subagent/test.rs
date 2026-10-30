@@ -1812,6 +1812,143 @@ async fn replay_loads_the_session_and_streams_the_history_without_prompting() {
     );
 }
 
+/// A LIVE turn against a harness that resumes through `session/load`
+/// (goose advertises `loadSession` WITHOUT `session/resume`) must not let
+/// the load's history replay reach the pane's timeline or the turn's
+/// closure. The v1 load contract streams the ENTIRE retained conversation
+/// as ordinary `session/update` notifications BEFORE the load response —
+/// measured live on `goose acp` — and unfiltered those old chunks used to
+/// mix previous turns into the new one (the reported prompt-pane symptom:
+/// "mistura entradas de momentos diferentes").
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_drops_the_load_replay_history_from_a_live_turn() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, ContentChunk, InitializeResponse, LoadSessionRequest,
+        LoadSessionResponse, PromptResponse, StopReason,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Channel, Responder};
+
+    let (client_side, agent_side) = Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("load-replay-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            // The goose shape: loadSession YES, no
+                            // `session/resume` — every live turn opens
+                            // through `session/load` and eats the replay.
+                            .agent_capabilities(AgentCapabilities::new().load_session(true)),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: LoadSessionRequest,
+                            responder: Responder<LoadSessionResponse>,
+                            cx| {
+                    // The load contract: replay ALL retained history as
+                    // ordinary session/update notifications BEFORE the
+                    // response lands — old user prompt and old answer both.
+                    let _ = cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("OLD prompt"),
+                        ))),
+                    ));
+                    let _ = cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("OLD answer"),
+                        ))),
+                    ));
+                    responder.respond(LoadSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: PromptRequest,
+                            responder: Responder<PromptResponse>,
+                            cx| {
+                    // The LIVE turn's own work streams after the load.
+                    let sid = agent_client_protocol::schema::v1::SessionId::new("fixture");
+                    let _ = cx.send_notification(SessionNotification::new(
+                        sid,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("NEW answer"),
+                        ))),
+                    ));
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
+
+    let (turn, streamed) = tokio::join!(
+        run_session(
+            client_side,
+            "NEW prompt".to_string(),
+            // The stored session id: a load-resume, exactly the goose path.
+            Some("fixture".to_string()),
+            std::env::temp_dir(),
+            &[],
+            None,
+            None,
+            accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        async {
+            let mut events = Vec::new();
+            while let Some(event) = chunk_rx.recv().await {
+                events.push(event);
+            }
+            events
+        },
+    );
+    agent_task.abort();
+
+    let (stop_reason, _session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    // The CLOSURE saw only this turn's work: the replayed OLD answer never
+    // entered the report the caller receives.
+    assert_eq!(
+        accumulated.lock().unwrap().output(),
+        "NEW answer",
+        "the load's history replay must not mix into the live turn's report"
+    );
+    // The STREAM (the pane's timeline) carries no replayed content either —
+    // no old user prompt, no old answer. Chrome (badge, modes, usage) is
+    // free to pass; only content is asserted absent.
+    assert!(
+        !streamed
+            .iter()
+            .any(|e| matches!(e, SubagentEvent::UserMessage { text } if text.contains("OLD"))),
+        "the replayed OLD prompt reached the live pane's timeline"
+    );
+    assert!(
+        !streamed
+            .iter()
+            .any(|e| matches!(e, SubagentEvent::Message { text } if text.contains("OLD"))),
+        "the replayed OLD answer reached the live pane's timeline"
+    );
+    assert!(
+        streamed
+            .iter()
+            .any(|e| matches!(e, SubagentEvent::Message { text } if text == "NEW answer")),
+        "the live turn's own answer still streamed"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn replay_fails_when_the_harness_does_not_advertise_load_session() {
     use agent_client_protocol::schema::v1::{

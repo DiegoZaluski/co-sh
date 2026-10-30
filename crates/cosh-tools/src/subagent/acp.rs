@@ -1931,11 +1931,29 @@ where
     let permission_tx = chunk_tx.clone();
     let permission_stop = stop_signal.clone();
 
+    // The session/LOAD replay window. The v1 ACP contract makes a
+    // `load`-resume stream the ENTIRE retained conversation as ordinary
+    // `session/update` notifications BEFORE the load response arrives
+    // (agentclientprotocol.com → "Loading Sessions": "The Agent MUST replay
+    // the entire conversation to the Client in the form of `session/update`
+    // notifications"). `goose acp` advertises `loadSession` WITHOUT
+    // `session/resume`, so EVERY live turn of a goose pane opens through
+    // `session/load` and receives that replay; opencode advertises
+    // `session/resume` (no replay) and never triggers it. Unfiltered, the
+    // replayed chunks land BOTH in the live pane's timeline (old turns
+    // visually mixed into the new one — the reported prompt-pane symptom)
+    // AND in the turn's closure (`TurnClosure`), corrupting the report the
+    // caller receives. Content mapped while this flag is set is dropped;
+    // chrome (usage, commands, config options — session STATE, not history)
+    // still passes. The flag is set around the session-open phase only.
+    let load_window = Arc::new(AtomicBool::new(false));
+
     // Route the transport through the generic connection machinery. The
     // subprocess launcher gets stderr line logging; in-memory test channels
     // pass through untouched. The badge emission below runs OUTSIDE the
     // notification closure that moves `chunk_tx`: its own sender clone.
     let model_tx = chunk_tx.clone();
+    let load_window_sink = load_window.clone();
     Client
         .builder()
         .name("cosh")
@@ -1947,6 +1965,19 @@ where
                 // returned report).
                 match SubagentEvent::from_session_update(notification.update) {
                     Some(event) => {
+                        // Inside the `session/load` replay window the agent is
+                        // streaming RETAINED HISTORY, not this turn's live
+                        // work (see the `load_window` block above): content
+                        // would corrupt both the pane's timeline and the
+                        // closure, so it is dropped here. Chrome still passes.
+                        if event.is_content()
+                            && load_window_sink.load(Ordering::Relaxed)
+                        {
+                            log::debug!(
+                                "sub-agent session/load replay chunk dropped from the live turn"
+                            );
+                            return Ok(());
+                        }
                         accumulated.lock().unwrap().observe(&event);
                         let _ = chunk_tx.send(event);
                     }
@@ -2158,43 +2189,53 @@ where
             // authentication attempt precedes the retry. A harness that
             // manages auth itself advertises no methods, and the retry
             // path then simply re-surfaces its own error message.
-            let opened = match handshake_step(
-                "session open",
-                open_or_resume_session(
-                    &connection,
-                    resume.clone(),
-                    &cwd,
-                    session_resume_support(&init.agent_capabilities),
-                ),
-            )
-            .await
-            {
-                Ok(open) => open,
-                Err(auth_error)
-                    if auth_error.code == ErrorCode::AuthRequired =>
-                {
-                    authenticate_on_auth_required(
+            let opened = {
+                // OPEN the replay window: the session-open phase below sends
+                // `session/load` when the harness advertises load-resume
+                // (goose) — its history replay arrives as notifications while
+                // the request is in flight and must not reach the timeline
+                // or the closure.
+                load_window.store(true, Ordering::Relaxed);
+                let opened = match handshake_step(
+                    "session open",
+                    open_or_resume_session(
                         &connection,
-                        &init.auth_methods,
-                        &auth_error,
-                    )
-                    .await?;
-                    handshake_step(
-                        "session open",
-                        open_or_resume_session(
+                        resume.clone(),
+                        &cwd,
+                        session_resume_support(&init.agent_capabilities),
+                    ),
+                )
+                .await
+                {
+                    Ok(open) => open,
+                    Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
+                        authenticate_on_auth_required(
                             &connection,
-                            resume,
-                            &cwd,
-                            session_resume_support(&init.agent_capabilities),
-                        ),
-                    )
-                    .await?
-                }
-                Err(auth_error) => return Err(auth_error),
+                            &init.auth_methods,
+                            &auth_error,
+                        )
+                        .await?;
+                        handshake_step(
+                            "session open",
+                            open_or_resume_session(
+                                &connection,
+                                resume,
+                                &cwd,
+                                session_resume_support(&init.agent_capabilities),
+                            ),
+                        )
+                        .await?
+                    }
+                    Err(auth_error) => return Err(auth_error),
+                };
+                opened
             };
+            // CLOSE the replay window: the load response has landed, so
+            // everything streaming from here is THIS turn's live work.
+            load_window.store(false, Ordering::Relaxed);
             let session_id = opened.session_id;
 
-// Re-apply the pane's config picks inside THIS turn's own
+            // Re-apply the pane's config picks inside THIS turn's own
             // connection — per-connection state dies with the connection
             // (verified against opencode and kilo), so this re-run before
             // every prompt is the only path a pick survives. Stale picks

@@ -535,6 +535,38 @@ pub(crate) fn mirror_config_option(option: &schema::SessionConfigOption) -> Agen
 }
 
 impl SubagentEvent {
+    /// Whether THIS event is timeline/report CONTENT — the conversation
+    /// material itself: message, thought, tool and plan data.
+    ///
+    /// Pane chrome (usage, mode, session info, commands, config options) is
+    /// NOT content: chrome reflects the session's CURRENT state, so replaying
+    /// it is harmless (it overwrites the same pane slot). Content is
+    /// chronological history: replaying it APPENDS old turns into a new one.
+    ///
+    /// The live-turn path (`acp::run_session`) uses this to drop the content
+    /// half of a `session/load` history replay — the v1 ACP contract makes a
+    /// `load`-resume stream the ENTIRE retained conversation as ordinary
+    /// `session/update` notifications BEFORE answering (measured on
+    /// `goose acp`: the `user_message_chunk` / `agent_thought_chunk` /
+    /// `agent_message_chunk` of EVERY previous turn arrive during the load
+    /// window). Unfiltered, that replay lands in the live pane's timeline
+    /// and in the turn's closure (`TurnClosure`), mixing entries from
+    /// different moments — the reported "pane mixes inputs from different
+    /// moments" symptom. The dedicated rehydrate path (`acp::replay`) is the
+    /// only consumer that WANTS the full content stream.
+    pub(crate) fn is_content(&self) -> bool {
+        matches!(
+            self,
+            Self::UserMessage { .. }
+                | Self::AgentMessage { .. }
+                | Self::Message { .. }
+                | Self::Thought { .. }
+                | Self::ToolCall { .. }
+                | Self::ToolCallUpdate { .. }
+                | Self::Plan { .. }
+        )
+    }
+
     /// Map one ACP `session/update` into a display event.
     ///
     /// Returns `None` for updates with no TUI representation (available-
