@@ -13,6 +13,10 @@ pub(crate) enum ResumeCause {
     EmptyStop,
     /// The textual-output repetition detector fired.
     Repetition,
+    /// The loop reached a natural completion while its own todo list still
+    /// shows open work (dsh-run-guard's "continue" throttle — the pending
+    /// state is the observable, not the model's judgement).
+    PendingTodos,
 }
 
 impl ResumeCause {
@@ -21,6 +25,7 @@ impl ResumeCause {
         match self {
             Self::EmptyStop => "empty response",
             Self::Repetition => "repetition-detection",
+            Self::PendingTodos => "pending-todos",
         }
     }
 }
@@ -127,17 +132,28 @@ impl Harness {
         // the model to "continue" work it never stopped doing.
         let mut steering = String::from(match cause {
             ResumeCause::Repetition => {
-                "[Harness note: your last few attempts repeated the same text \
-                 verbatim instead of advancing, so the harness is giving you one \
-                 more turn rather than ending this one. Your context is intact. Do \
-                 NOT restate the same message: take the next concrete step and end \
-                 with your final report.]"
+                "[harness:loop-guard:repetition] [Harness note: your last few attempts \
+                 repeated the same text verbatim instead of advancing, so the harness is \
+                 giving you one more turn rather than ending this one. Your context is \
+                 intact. Do NOT restate the same message: take the next concrete step and \
+                 end with your final report.]"
             }
             ResumeCause::EmptyStop => {
-                "[Harness note: your previous attempt ended with no output at all \
-                 before you delivered the report this turn exists to produce. Your \
-                 context is intact — nothing was lost. Continue from exactly where \
-                 you were cut and finish the task, ending with your final report.]"
+                "[harness:loop-guard:empty-stop] [Harness note: your previous attempt \
+                 ended with no output at all before you delivered the report this turn \
+                 exists to produce. Your context is intact — nothing was lost. Continue \
+                 from exactly where you were cut and finish the task, ending with your \
+                 final report.]"
+            }
+            ResumeCause::PendingTodos => {
+                "[harness:loop-guard:pending-todos] [Harness note: your turn was about \
+                 to end, but the todo list you maintain still shows open items. The \
+                 harness is giving you one more turn rather than ending it here. FIRST: \
+                 reconcile the list — if an item is actually done or no longer applies, \
+                 mark it done/cancelled (plan_todo_write); the list is the record this \
+                 gate trusts, and an accurate list is what lets the turn end cleanly. \
+                 THEN: if real work remains, take the next concrete step on the first \
+                 open item; if nothing remains, end with your final report.]"
             }
         });
         let reasoning = std::mem::take(&mut self.attempt_reasoning);

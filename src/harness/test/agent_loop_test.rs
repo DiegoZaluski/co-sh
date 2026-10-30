@@ -2199,11 +2199,13 @@ async fn checkup_records_the_verdict_on_a_guard_stop() {
 #[tokio::test]
 async fn checkup_veto_is_bounded_by_max_iterations() {
     // The natural-completion veto runs with `finished == true`, so the
-    // `!finished` MAX_ITERATIONS guard never bounds it — the veto itself
-    // must. The stub says NOT terminated for every turn below the cap
-    // (`iteration < MAX_ITERATIONS` vetoes; the first turn is iteration 1);
-    // at `iteration == MAX_ITERATIONS` the veto fails and the plain `Done`
-    // must fire instead of the loop running forever.
+    // `!finished` MAX_ITERATIONS guard never bounds it — but neither bounds
+    // this test: the stub says NOT terminated for every turn (one verdict
+    // per veto; the checkup only reviews turns where a tool ran, so this
+    // all-text loop is never audited). The model's own stop stands and the
+    // plain `Done` must fire instead of the loop running forever. (The
+    // veto-budget pin lives in
+    // `checkup_veto_budget_exhaustion_stops_before_max_iterations` below.)
     let streams: Vec<Result<Vec<&str>, &str>> = (0..MAX_ITERATIONS)
         .map(|_| Ok(vec!["Still", " working"]))
         .collect();
@@ -2235,6 +2237,73 @@ async fn checkup_veto_is_bounded_by_max_iterations() {
     assert_eq!(
         done_count, 1,
         "the MAX_ITERATIONS cap must bound the veto, events={events:?}"
+    );
+}
+
+/// THE dedicated veto budget: the stub vetoes EVERY natural stop, so the
+/// loop must fire the veto arm exactly CHECKUP_VETO_BUDGET times and then
+/// let the model's stop stand — regardless of how far MAX_ITERATIONS is.
+/// Each cycle is a tool-call stream (the checkup only reviews turns where a
+/// tool ran) followed by a final-sounding text stream the stub judges NOT
+/// terminated. Counted by the veto toast (one per granted veto), the same
+/// signal the user sees.
+#[tokio::test]
+async fn checkup_veto_budget_exhaustion_stops_before_max_iterations() {
+    use crate::harness::core::CHECKUP_VETO_BUDGET;
+
+    const CALL: &str = r#"{"name": "test_tool", "arguments": {"x": "same"}}"#;
+    let tool_json = serde_json::json!({
+        "type": "object",
+        "properties": { "x": { "type": "string" } },
+        "required": ["x"]
+    });
+    // One NOT-terminated verdict per potential veto, plus slack: the stub
+    // defaults to Terminated once the queue drains, so the slack verdicts
+    // must never be reached — proving the budget, not the queue, ended it.
+    let mut streams = Vec::new();
+    for _ in 0..CHECKUP_VETO_BUDGET * 4 {
+        streams.push(Ok(vec![CALL]));
+        streams.push(Ok(vec!["Still", " working"]));
+    }
+    let verdicts: Vec<TerminationVerdict> = (0..CHECKUP_VETO_BUDGET * 4)
+        .map(|_| not_terminated(0.9))
+        .collect();
+    let mut h = Harness::new_test()
+        .with_test_tool("test_tool", tool_json)
+        .with_mock_streams(streams);
+    for _ in 0..CHECKUP_VETO_BUDGET * 8 {
+        h = h.with_mock_finish_reason(Some("stop"));
+    }
+    let mut h = h
+        .with_checkup(StubCheckup::with_verdicts(verdicts))
+        .with_checkup_min_confidence(0.5);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("never done", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    let veto_count = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Toast { message, .. } if message.contains("the agent is continuing")))
+        .count();
+    assert_eq!(
+        veto_count, CHECKUP_VETO_BUDGET as usize,
+        "exactly CHECKUP_VETO_BUDGET vetoes may be granted, events={events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+            .count(),
+        1,
+        "the exhausted veto budget must let the model's stop stand with one Done"
     );
 }
 

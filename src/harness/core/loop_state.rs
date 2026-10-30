@@ -26,6 +26,22 @@ pub(super) enum RepetitionVerdict {
     Stopped,
 }
 
+/// What the tool-interaction loop detector decided for this iteration — the
+/// three-outcome shape of [`RepetitionVerdict`], for the detector the
+/// repetition one mirrors (see `check_loop_detection`): a report-owing
+/// turn's FIRST firing becomes a bounded recovery instead of a stop.
+pub(super) enum LoopGuardVerdict {
+    /// Below the threshold or the window not yet full: proceed normally.
+    Clear,
+    /// The detector fired on a report-owing turn and the recovery was
+    /// granted. Carries the steering message for the next request.
+    Recovery(String),
+    /// The detector fired and the stop STANDS (a chat turn, a user stop, the
+    /// recovery budget spent, or a second firing in the same window). The
+    /// terminal `Done` was already emitted.
+    Stopped,
+}
+
 impl Harness {
     /// Hash one iteration's tool interactions (name, arguments, result — in
     /// dispatch order) into a stable signature for loop detection, mirroring
@@ -51,10 +67,16 @@ impl Harness {
 
     /// Crush-style loop detection over the current tool interactions.
     ///
-    /// Pushes the current interaction signature into `loop_window` and stops
-    /// the loop (Toast + `Done`, returns `true`) when the same signature
-    /// shows up more than [`LOOP_DETECTION_MAX_REPEATS`] times within a full
-    /// [`LOOP_DETECTION_WINDOW_SIZE`] window.
+    /// Pushes the current interaction signature into `loop_window` and, when
+    /// the same signature shows up more than [`LOOP_DETECTION_MAX_REPEATS`]
+    /// times within a full [`LOOP_DETECTION_WINDOW_SIZE`] window, decides the
+    /// loop is stuck. The decision is a LADDER, not a sentence (OpenClaw
+    /// #118647's bounded recovery): a report-owing turn's FIRST firing whose
+    /// recovery is unspent and which nobody asked to stop becomes a
+    /// [`LoopGuardVerdict::Recovery`] — one steering continuation naming the
+    /// evidence — while a chat turn, a user stop, a spent recovery, or a
+    /// SECOND firing in the same window (the window is never reset) stops
+    /// the loop: Toast + `Done`, return `Stopped`.
     ///
     /// Called BOTH mid-iteration (the guardrail/hook denial arms, whose
     /// `continue` skips the end-of-iteration checks — without this a stuck
@@ -68,10 +90,12 @@ impl Harness {
         &mut self,
         tool_interactions: &[String],
         loop_window: &mut VecDeque<String>,
+        stop_signal: &std::sync::atomic::AtomicBool,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
-    ) -> bool {
+    ) -> LoopGuardVerdict {
+        use std::sync::atomic::Ordering;
         if tool_interactions.is_empty() {
-            return false;
+            return LoopGuardVerdict::Clear;
         }
         let sig = Self::tool_interaction_signature(tool_interactions);
         loop_window.push_back(sig.clone());
@@ -80,6 +104,66 @@ impl Harness {
         }
         let repeats = loop_window.iter().filter(|s| **s == sig).count();
         if loop_window.len() == LOOP_DETECTION_WINDOW_SIZE && repeats > LOOP_DETECTION_MAX_REPEATS {
+            // Bounded recovery FIRST: a report-owing turn (a pane whose
+            // requester is blocked on its report) gets ONE steering
+            // continuation naming the evidence before the stop stands —
+            // the model may recognize the pattern and change approach or
+            // deliver the report it owes. Every refusal condition is exact:
+            // a chat turn's stop is the user's to read, a user stop is
+            // always honored, the recovery is one-shot, and the window's
+            // persistence makes the NEXT firing a stop regardless.
+            //
+            // The recovery draws from the loop's SHARED improper-stop pool
+            // (`coworker_resumes_left`), not a private budget — two
+            // accelerators can never stack beyond the pool the pane's
+            // blocked requester agreed to wait through. The one-shot flag
+            // still exists because the POOL refusing is different from the
+            // detector refusing: a pool-exhausted pane (empty-stop resumes
+            // spent earlier) must stop HERE rather than burn the shared
+            // budget on a loop the model has not yet been told about —
+            // spend the detector's share on it once, then let the ladder
+            // close.
+            //
+            // `has_pending_tools` guards the MID-DISPATCH call sites: while
+            // sibling calls of a batch are still queued (their history rows
+            // recorded, results not), a `continue 'iteration` would build
+            // the next request with orphaned tool_calls the pair-validating
+            // providers reject. So a recovery is only granted when the loop
+            // can cleanly continue. When the guard REFUSES the recovery
+            // mid-dispatch, the pre-existing stop path runs as-is — queued
+            // siblings keep their orphaned rows (unchanged from the old
+            // `bool` detector); fixing that would mean deferring the stop,
+            // a behavioral change beyond this ladder's scope.
+            if self.owes_report()
+                && self.tool_loop_recovery_left
+                && self.coworker_resumes_left > 0
+                && !self.has_pending_tools()
+                && !self.stop
+                && !stop_signal.load(Ordering::Relaxed)
+            {
+                self.tool_loop_recovery_left = false;
+                self.coworker_resumes_left -= 1;
+                let _ = tx.send(super::events::HarnessEvent::Toast {
+                    message: "Loop guard: repeated identical tool calls detected — \
+                              one recovery attempt granted before the loop stops."
+                        .to_string(),
+                    variant: super::events::ToastVariant::Info,
+                });
+                log::warn!(
+                    target: "laya",
+                    "loop-detection: recovery granted (report-owing turn, nobody asked \
+                     it to stop) — steering instead of stopping"
+                );
+                return LoopGuardVerdict::Recovery(
+                    "[harness:loop-guard:tool-loop] You have repeated the SAME tool \
+                     calls with the SAME results several times in a row — the harness \
+                     detected the loop and is giving you ONE more attempt instead of \
+                     ending your turn. Do NOT repeat those calls: change the approach \
+                     (different tool, different arguments, or ask/inspect what you are \
+                     missing) and end with your final report as soon as you can."
+                        .to_string(),
+                );
+            }
             // Heuristic guard: the stop stands, but the decision model
             // audits it so an improper stop is never silent.
             let verdict = self.review_guard_stop("loop-detection");
@@ -95,9 +179,9 @@ impl Harness {
                 context: self.context_manager.save_state(),
                 checkup_verdict: verdict,
             });
-            return true;
+            return LoopGuardVerdict::Stopped;
         }
-        false
+        LoopGuardVerdict::Clear
     }
 
     /// Textual-output repetition detection: the blind spot of the crush-style

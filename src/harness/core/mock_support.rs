@@ -46,6 +46,8 @@ impl Harness {
             last_stream_unfinished: false,
             stop_nudges_left: super::limits::STOP_NUDGE_BUDGET,
             coworker_resumes_left: super::limits::COWORKER_RESUME_BUDGET,
+            tool_loop_recovery_left: super::limits::TOOL_LOOP_RECOVERY_SHARE > 0,
+            checkup_vetoes_left: super::limits::CHECKUP_VETO_BUDGET,
             stop_nudge_budget_override: None,
             prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]

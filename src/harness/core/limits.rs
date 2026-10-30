@@ -33,6 +33,18 @@ pub(crate) const ITERATION_RENEWALS: u32 = 2;
 /// resurfaces, raise this — never remove the bound.
 pub(crate) const STOP_NUDGE_BUDGET: u32 = 10;
 
+/// Dedicated bound on the decision model's natural-stop veto (the checkup).
+/// The veto previously answered only to `MAX_ITERATIONS` — a persistent
+/// model↔checkup disagreement on text-only turns could re-send the growing
+/// context up to 100 times before the iteration bound ended it. Three vetoes
+/// keep the fail-open audit an IMPROVER (the model may stand by its
+/// completion on the next review) while making the worst case cheap. The
+/// injected veto turn stays a bare `continue`: coaching it would confirm a
+/// running state the model can never disprove (the summary-veto loop the
+/// call site's comment already documents). Exhausted → the model's stop
+/// stands, verdict still recorded.
+pub(crate) const CHECKUP_VETO_BUDGET: u32 = 3;
+
 /// Resume budget for a `/agents` PANE turn — how many times the harness
 /// re-sends the context after a stop NOBODY asked for (the natural-stop
 /// gate's [`STOP_NUDGE_BUDGET`] exhausted on an empty completion, or the
@@ -70,6 +82,21 @@ pub(crate) const STOP_NUDGE_BUDGET: u32 = 10;
 /// `incomplete` with its guard verdict. Never remove this bound; raise it
 /// only against a measured streak.
 pub(crate) const COWORKER_RESUME_BUDGET: u32 = 2;
+
+/// Bounded recovery for the TOOL-INTERACTION loop detector (OpenClaw
+/// #118647's "recover once from critical tool loops"): whether a
+/// report-owing turn's detector firing may be converted into a steering
+/// continuation instead of a stop. The recovery draws from the SAME pool
+/// the improper-stop resumes use ([`COWORKER_RESUME_BUDGET`]) — two
+/// continuations TOTAL per turn chain, shared across accelerators, so two
+/// detectors can never double the re-sends a blocked requester waits
+/// through — while this flag keeps the DETECTOR's share one-shot: a pane
+/// whose pool was spent on empty-stop resumes stops here rather than
+/// silently re-branding its last unit as a tool-loop recovery. (A second
+/// detector firing stops regardless — see `tool_loop_recovery_left`.)
+/// Chat turns (which owe no report) never draw from the pool: their stop
+/// is the user's to read.
+pub(crate) const TOOL_LOOP_RECOVERY_SHARE: u32 = 1;
 
 /// Loop-detection window: the number of recent tool-call iterations watched
 /// for a repeated identical interaction, mirroring crush's

@@ -13,7 +13,7 @@ use crate::harness::tools::CoshTools;
 use super::{
     ContextManager, CorrectionMemory, Harness, MAX_CONTEXT_TOKENS, Mode, PrefixCacheProbe,
     PromptSystem, SUBAGENT_INTERNAL_NOTE, build_lsp, default_harness_tools,
-    limits::{COWORKER_RESUME_BUDGET, STOP_NUDGE_BUDGET},
+    limits::{CHECKUP_VETO_BUDGET, COWORKER_RESUME_BUDGET, STOP_NUDGE_BUDGET, TOOL_LOOP_RECOVERY_SHARE},
 };
 
 impl Harness {
@@ -58,6 +58,8 @@ impl Harness {
             last_stream_unfinished: false,
             stop_nudges_left: STOP_NUDGE_BUDGET,
             coworker_resumes_left: COWORKER_RESUME_BUDGET,
+            tool_loop_recovery_left: TOOL_LOOP_RECOVERY_SHARE > 0,
+            checkup_vetoes_left: CHECKUP_VETO_BUDGET,
             #[cfg(test)]
             stop_nudge_budget_override: None,
             prefix_cache_probe: PrefixCacheProbe::default(),

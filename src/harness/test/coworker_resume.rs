@@ -229,3 +229,204 @@ async fn repetition_detection_resumes_a_pane_instead_of_stopping() {
         "the repetition resume must consume exactly one unit of the bound"
     );
 }
+
+/// The tool-interaction loop detector's stop is an improper stop for a pane
+/// too (OpenClaw #118647's bounded recovery): the FIRST firing becomes a
+/// steering continuation naming the evidence, and the model escapes the
+/// loop by delivering the report. A pane cannot call `stop_agent_loop`, so
+/// without this the blocked requester gets `incomplete` for work one attempt
+/// short of done.
+#[tokio::test]
+async fn tool_loop_detection_recovers_a_pane_once_before_stopping() {
+    // 20 identical tool-calling iterations — the detector must fire at 10
+    // (window full), RECOVER (one steering attempt), and the model must
+    // deliver the report on the next turn instead of repeating the call.
+    let call = r#"{"name": "test_tool", "arguments": {"x": "same"}}"#;
+    let mut streams: Vec<Result<Vec<&str>, &str>> = (0..20)
+        .map(|_| Ok(vec![call]))
+        .collect();
+    // After the recovery steering lands, the model changes behavior.
+    streams[10] = Ok(vec!["the report"]);
+    let mut h = pane()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(streams);
+
+    let (h, events) = drive(h).await;
+
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match items.last() {
+        Some(ContextItem::Closure { content, .. }) => {
+            assert_eq!(content, "the report", "the recovery must let the pane deliver")
+        }
+        other => panic!("the pane must recover from the tool-loop firing, got {other:?}"),
+    }
+    assert!(
+        has_toast(&events, "one recovery attempt granted"),
+        "the recovery must be visible: {events:?}"
+    );
+}
+
+/// THE LADDER, both steps: the FIRST detector firing recovers (one steering
+/// attempt), and the SECOND firing in the same window stops the pane for
+/// real — the window is never reset and the detector's share is one-shot,
+/// so recovery cannot become another unbounded loop.
+#[tokio::test]
+async fn tool_loop_detection_recovers_once_then_stops_on_the_second_firing() {
+    // Iterations 1-10 fill the window with the identical signature (first
+    // firing at iteration 10's end-of-iteration check → recovery);
+    // iteration 11 repeats the call again → second firing → Stopped.
+    let call = r#"{"name": "test_tool", "arguments": {"x": "same"}}"#;
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..11)
+        .map(|_| Ok(vec![call]))
+        .collect();
+    let mut h = pane()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(streams);
+
+    let (h, events) = drive(h).await;
+
+    assert!(
+        has_toast(&events, "one recovery attempt granted"),
+        "the first firing must recover: {events:?}"
+    );
+    assert!(
+        has_toast(&events, "Agent stopped: repeated identical tool calls"),
+        "the second firing must stop: {events:?}"
+    );
+    assert_eq!(
+        h.coworker_resumes_left(),
+        Harness::coworker_resume_budget() - 1,
+        "the recovery must have consumed exactly one unit of the shared pool"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the second firing must close the turn with Done: {events:?}"
+    );
+}
+
+/// The tool-loop recovery is a PANE-only courtesy: a chat turn's stop on the
+/// detector firing is final (the user reads the answer), so the ladder must
+/// not inject steering there either.
+#[tokio::test]
+async fn tool_loop_detection_stops_a_chat_turn_without_recovery() {
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..12)
+        .map(|_| Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "same"}}"#]))
+        .collect();
+    let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(streams);
+
+    let (_h, events) = drive(h).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the chat turn stops on the detector firing: {events:?}"
+    );
+    assert!(
+        has_toast(&events, "repeated identical tool calls"),
+        "the stop must stay visible: {events:?}"
+    );
+    assert!(
+        !has_toast(&events, "one recovery attempt granted"),
+        "a chat turn never draws from the recovery budget: {events:?}"
+    );
+}
+
+/// The pending-todos throttle: a pane reaching a natural completion while
+/// ITS OWN todo list still shows open work resumes instead of ending — the
+/// pending state is the model's own observable bookkeeping, and the
+/// requester is blocked on the report.
+#[tokio::test]
+async fn pending_todos_resume_a_pane_instead_of_ending_the_turn() {
+    use cosh_tools::plan::types::{TodoItem, TodoList, TodoStatus};
+    let h = pane()
+        .with_mock_streams(vec![
+            Ok(vec!["Looks", " done"]),
+            Ok(vec!["the report"]),
+            // A STALE todo cannot resume forever: the improper-stop budget
+            // bounds it, and the turn then closes on its own completion —
+            // the bounded-resume contract every accelerator shares.
+            Ok(vec!["the final", " report"]),
+        ])
+        .with_mock_finish_reason(Some("stop"));
+    // An open todo the "model" left behind: the stop is improper while it
+    // shows open work.
+    let mut h = h;
+    h.context_manager.set_todo_list(TodoList {
+        items: vec![TodoItem {
+            id: "task-1".into(),
+            description: "write the final report".into(),
+            status: TodoStatus::Pending,
+            depends_on: vec![],
+        }],
+    });
+
+    let (h, _events) = drive(h).await;
+
+    assert_eq!(
+        h.coworker_resumes_left(),
+        0,
+        "every resume the stale todo granted must consume the bound"
+    );
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match items.last() {
+        Some(ContextItem::Closure { content, .. }) => assert_eq!(content, "the final report"),
+        other => panic!("the pane must resume while todos are open, got {other:?}"),
+    }
+}
+
+/// A completed todo list does NOT hold the turn open: the natural completion
+/// stands and the pane delivers without consuming a resume.
+#[tokio::test]
+async fn completed_todos_do_not_block_the_pane_completion() {
+    use cosh_tools::plan::types::{TodoItem, TodoList, TodoStatus};
+    let mut h = pane()
+        .with_mock_stream(Ok(vec!["the report"]))
+        .with_mock_finish_reason(Some("stop"));
+    h.context_manager.set_todo_list(TodoList {
+        items: vec![TodoItem {
+            id: "task-1".into(),
+            description: "already done".into(),
+            status: TodoStatus::Completed,
+            depends_on: vec![],
+        }],
+    });
+
+    let (h, _events) = drive(h).await;
+
+    assert_eq!(
+        h.coworker_resumes_left(),
+        Harness::coworker_resume_budget(),
+        "a completed list must not consume any resume"
+    );
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match items.last() {
+        Some(ContextItem::Closure { content, .. }) => assert_eq!(content, "the report"),
+        other => panic!("the completed list must not reopen the turn, got {other:?}"),
+    }
+}

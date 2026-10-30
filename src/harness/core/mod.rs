@@ -85,6 +85,11 @@ pub use tool_catalog::HarnessTool;
 use tool_catalog::{build_lsp, default_harness_tools, PromptSystem};
 
 pub(crate) use limits::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, ITERATION_RENEWALS, SUBAGENT_BLOCKED_TOOLS};
+// Test-only: the veto-budget pin counts against this bound (the lib itself
+// reads it from `limits::` directly), so the re-export must not exist in a
+// production build — there it is an unused import.
+#[cfg(test)]
+pub(crate) use limits::CHECKUP_VETO_BUDGET;
 use limits::{LOOP_DETECTION_WINDOW_SIZE, MAX_TOOL_RETRIES, SUBAGENT_INTERNAL_NOTE};
 pub use prompts::{
     INSTRUCTIONS_ASK, INSTRUCTIONS_BUILD, INSTRUCTIONS_BUILD_BASE, INSTRUCTIONS_BUILD_SELF_REVIEW,
@@ -246,6 +251,20 @@ pub struct Harness {
     /// continuation safe. Consumed only by [`Self::resume_pane_turn`]; a loop
     /// that owes no report never reaches it (the helper refuses).
     coworker_resumes_left: u32,
+
+    /// Whether the tool-interaction loop detector's ONE bounded recovery
+    /// ([`super::limits::TOOL_LOOP_RECOVERY_SHARE`]) is still available to
+    /// this loop. The detector's window is NEVER reset: once this share is
+    /// spent, the next firing of the SAME window stops the loop for real,
+    /// so the recovery cannot become another unbounded loop.
+    tool_loop_recovery_left: bool,
+
+    /// Remaining checkup vetoes for THIS loop. The decision model's
+    /// natural-stop veto used to answer only to `MAX_ITERATIONS` — a
+    /// persistent model↔checkup disagreement re-sent the growing context up
+    /// to 100 times. See [`super::limits::CHECKUP_VETO_BUDGET`]; exhausted,
+    /// the model's stop stands with the verdict still recorded.
+    checkup_vetoes_left: u32,
 
     /// Exact-prefix cache probe: the previous request's fingerprint and the
     /// running counters. See [`PrefixCacheProbe`].

@@ -227,6 +227,11 @@ impl Harness {
         // reused one — which must not start with an already-spent budget and
         // close `incomplete` for a cut it never got the chance to recover.
         self.coworker_resumes_left = super::limits::COWORKER_RESUME_BUDGET;
+        // The other two per-loop bounds renew on the same contract: a
+        // reused harness must not inherit the previous turn's spent
+        // detector share or checkup vetoes.
+        self.tool_loop_recovery_left = super::limits::TOOL_LOOP_RECOVERY_SHARE > 0;
+        self.checkup_vetoes_left = super::limits::CHECKUP_VETO_BUDGET;
 
         // Whether ANY tool ran this turn. A turn with zero tool dispatches
         // is a pure text exchange — the request was answerable directly, so
@@ -415,7 +420,7 @@ impl Harness {
             };
         }
 
-        loop {
+        'iteration: loop {
             iteration += 1;
             log::debug!(
                 "run_agent_loop ITERATION={} input_len={} pending_tools={}",
@@ -1224,10 +1229,28 @@ impl Harness {
                         }
                         // Run the loop detector before the `continue` skips
                         // the end-of-iteration check (same rationale as the
-                        // guardrail-deny path below).
-                        if self.check_loop_detection(&tool_interactions, &mut loop_window, &tx) {
-                            terminal_sent = true;
-                            break;
+                        // guardrail-deny path below). A granted recovery
+                        // also `continue`s — straight to the next iteration,
+                        // SKIPPING the end-of-iteration detector call: the
+                        // firing was already counted in the window here, and
+                        // a second push this iteration would consume the
+                        // stop on the same evidence the recovery just
+                        // steered away from.
+                        match self.check_loop_detection(
+                            &tool_interactions,
+                            &mut loop_window,
+                            &stop_signal,
+                            &tx,
+                        ) {
+                            super::loop_state::LoopGuardVerdict::Clear => {}
+                            super::loop_state::LoopGuardVerdict::Stopped => {
+                                terminal_sent = true;
+                                break;
+                            }
+                            super::loop_state::LoopGuardVerdict::Recovery(steering) => {
+                                current_input = steering;
+                                continue 'iteration;
+                            }
                         }
                         if self.tool_failure_count >= MAX_TOOL_RETRIES {
                             let msg = format!(
@@ -1299,11 +1322,26 @@ impl Harness {
                             // interaction — run the loop detector HERE, before
                             // the `continue` skips the end-of-iteration check:
                             // a stuck model re-issuing an identical denied call
-                            // must hit the detector, not the retry budget.
-                            if self.check_loop_detection(&tool_interactions, &mut loop_window, &tx)
-                            {
-                                terminal_sent = true;
-                                break;
+                            // must hit the detector, not the retry budget. A
+                            // granted recovery jumps to the next iteration
+                            // with the steering (same rationale as the hook
+                            // arm above: the firing is already counted, a
+                            // second push this iteration would stop on it).
+                            match self.check_loop_detection(
+                                &tool_interactions,
+                                &mut loop_window,
+                                &stop_signal,
+                                &tx,
+                            ) {
+                                super::loop_state::LoopGuardVerdict::Clear => {}
+                                super::loop_state::LoopGuardVerdict::Stopped => {
+                                    terminal_sent = true;
+                                    break;
+                                }
+                                super::loop_state::LoopGuardVerdict::Recovery(steering) => {
+                                    current_input = steering;
+                                    continue 'iteration;
+                                }
                             }
                             if self.tool_failure_count >= MAX_TOOL_RETRIES {
                                 let msg = format!(
@@ -1743,12 +1781,21 @@ impl Harness {
             // signature seen more than LOOP_DETECTION_MAX_REPEATS times
             // within the recent window means the model is stuck repeating
             // the exact same action (e.g. re-running a failing command).
-            // Stop the loop here instead of burning tokens up to
-            // MAX_ITERATIONS — same safety intent, caught far earlier.
-            // (The `break` exits the outer iteration loop directly, so no
-            // terminal_sent bookkeeping is needed at this call site.)
-            if self.check_loop_detection(&tool_interactions, &mut loop_window, &tx) {
-                break;
+            // The ladder decides the shape: a report-owing turn's first
+            // firing recovers (steering), everything else stops the loop —
+            // instead of burning tokens up to MAX_ITERATIONS — same safety
+            // intent, caught far earlier. (The `break` exits the outer
+            // iteration loop directly, so no terminal_sent bookkeeping is
+            // needed at this call site; a recovery `continue`s with the
+            // steering as the next input.)
+            match self.check_loop_detection(&tool_interactions, &mut loop_window, &stop_signal, &tx)
+            {
+                super::loop_state::LoopGuardVerdict::Clear => {}
+                super::loop_state::LoopGuardVerdict::Stopped => break,
+                super::loop_state::LoopGuardVerdict::Recovery(steering) => {
+                    current_input = steering;
+                    continue 'iteration;
+                }
             }
 
             if !had_tools {
@@ -2023,12 +2070,21 @@ impl Harness {
                         // it — without this bound a persistent model/checkup
                         // disagreement on text-only turns would never stop.
                         && iteration < MAX_ITERATIONS
+                        // A DEDICATED budget (CHECKUP_VETO_BUDGET), tighter
+                        // than MAX_ITERATIONS: the veto re-sends the growing
+                        // context, so a persistent disagreement must get
+                        // expensive long before the iteration bound. The
+                        // verdict below is still recorded — the audit never
+                        // disappears, it just stops overriding the model.
+                        && self.checkup_vetoes_left > 0
                     {
+                        self.checkup_vetoes_left -= 1;
                         log::info!(
                             target: "laya",
-                            "checkup: VETOED the natural stop (confidence {:.2}, floor {:.2}) — continuing",
+                            "checkup: VETOED the natural stop (confidence {:.2}, floor {:.2}) — continuing ({} vetoes left)",
                             verdict.confidence,
-                            self.checkup_min_confidence
+                            self.checkup_min_confidence,
+                            self.checkup_vetoes_left
                         );
                         log::debug!(
                             "run_agent_loop checkup vetoed natural completion \
@@ -2055,6 +2111,62 @@ impl Harness {
                         // dispatch actual work.
                         current_input = "continue".to_string();
                         continue;
+                    }
+                }
+
+                // Deterministic "pending work → continue" throttle (dsh-run-guard's
+                // `continue` face), scoped EXACTLY to report-owing turns: a pane
+                // whose own todo list still shows open work must not end its turn
+                // — its requester is blocked on the report, and the pending state
+                // is the model's OWN observable bookkeeping, not a judgement. A
+                // chat turn never reaches this: its stop is the user's to read,
+                // and a stale auto-declared todo must not reopen it (the false
+                // positive that keeps this out of the main loop). Consumes the
+                // same improper-stop budget as every other resume, so the
+                // accelerators can never stack.
+                if self.owes_report()
+                    && !self.stop
+                    && !stop_signal.load(std::sync::atomic::Ordering::Relaxed)
+                    && self.coworker_resumes_left > 0
+                    // Outstanding `agents_call` answers outrank the todo
+                    // list: the reports arrive momentarily and are fresher
+                    // steering than a "continue the first open item" —
+                    // spending a resume before them would burn a unit on
+                    // material about to arrive anyway (the wait below).
+                    && !super::agent_coworkers::has_outstanding_requests(self.coworkers_requester)
+                {
+                    let open: Vec<String> = self
+                        .context_manager
+                        .todo_list()
+                        .map(|list| {
+                            list.items
+                                .iter()
+                                .filter(|item| {
+                                    matches!(
+                                        item.status,
+                                        cosh_tools::plan::types::TodoStatus::Pending
+                                            | cosh_tools::plan::types::TodoStatus::InProgress
+                                    )
+                                })
+                                .map(|item| format!("- [{}] {}", item.status, item.description))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !open.is_empty() {
+                        let listed = open.join("\n");
+                        log::info!(
+                            target: "laya",
+                            "natural-stop gate: pending todo items on a report-owing turn — \
+                             resuming instead of ending ({} open, {} resumes left)",
+                            open.len(),
+                            self.coworker_resumes_left - 1
+                        );
+                        if let Some(steering) =
+                            self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::PendingTodos)
+                        {
+                            current_input = format!("{steering}\n\nOpen items:\n{listed}");
+                            continue;
+                        }
                     }
                 }
                 // log::debug!("run_agent_loop DONE (no tools)");
