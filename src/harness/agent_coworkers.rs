@@ -88,6 +88,13 @@ pub struct AgentCoworkerDescriptor {
     /// agent's coworker listing renders it next to the id so it always knows
     /// where each coworker works.
     pub worktree: Option<String>,
+    /// The model the coworker's agent session currently runs with, as the
+    /// pane reports it (`AgentSessionInfo::model`, falling back to the
+    /// pane's committed `PaneModelSelection`) — `None` until the first
+    /// turn (or replay pass) reports it, and for cowokers whose harness
+    /// never advertises a model. The main agent's coworker listing renders
+    /// it next to the worktree so it always knows what serves each pane.
+    pub model: Option<String>,
 }
 
 /// How a request's answer reaches the caller.
@@ -1657,9 +1664,14 @@ pub fn context_block() -> Option<String> {
             .as_deref()
             .map(|name| format!(", worktree {name}"))
             .unwrap_or_default();
+        let model = coworker
+            .model
+            .as_deref()
+            .map(|name| format!(", model {name}"))
+            .unwrap_or_default();
         let _ = writeln!(
             block,
-            "- {} — {} ({session}{worktree})",
+            "- {} — {} ({session}{worktree}{model})",
             coworker.id, coworker.agent
         );
     }
@@ -1694,7 +1706,12 @@ pub fn peer_block(own_id: &str) -> Option<String> {
             .as_deref()
             .map(|name| format!(", worktree {name}"))
             .unwrap_or_default();
-        let _ = writeln!(block, "- {} — {}{}", coworker.agent, coworker.id, worktree);
+        let model = coworker
+            .model
+            .as_deref()
+            .map(|name| format!(", model {name}"))
+            .unwrap_or_default();
+        let _ = writeln!(block, "- {} — {}{}{model}", coworker.agent, coworker.id, worktree);
     }
     block.push_str(
         "You do NOT coordinate them (no `agents_call` for you): do your own \
@@ -1956,6 +1973,7 @@ mod tests {
             is_manager: agent == "cosh",
             bound,
             worktree: None,
+            model: None,
         }
     }
 
@@ -1969,6 +1987,7 @@ mod tests {
             is_manager: agent == "cosh",
             bound: false,
             worktree: None,
+            model: None,
         }
     }
 
@@ -2709,15 +2728,38 @@ mod tests {
         let _g = lock();
         let mut pinned = coworker("claude", "claude", true);
         pinned.worktree = Some("wt-feat".to_string());
+        pinned.model = Some("claude-opus-4-6".to_string());
         set_coworkers(vec![pinned, coworker("kilo", "kilo", false)]);
         let block = context_block().expect("block");
         assert!(
-            block.contains("- claude — claude (agent session bound, worktree wt-feat)"),
+            block.contains(
+                "- claude — claude (agent session bound, worktree wt-feat, model claude-opus-4-6)"
+            ),
             "{block}"
         );
         assert!(
             block.contains("- kilo — kilo (no session yet (the first agents_call wakes it))"),
             "no-worktree pane renders unchanged: {block}"
+        );
+    }
+
+    /// The model suffix follows the worktree suffix in the listing, and a
+    /// coworker whose pane never reported a model renders without it —
+    /// the block never guesses.
+    #[test]
+    fn context_block_renders_the_model_after_the_worktree() {
+        let _g = lock();
+        let mut reported = coworker("goose", "goose", true);
+        reported.model = Some("goose-3-pro".to_string());
+        set_coworkers(vec![reported, coworker("kilo", "kilo", true)]);
+        let block = context_block().expect("block");
+        assert!(
+            block.contains("- goose — goose (agent session bound, model goose-3-pro)"),
+            "{block}"
+        );
+        assert!(
+            !block.contains("kilo (no session yet (the first agents_call wakes it), model"),
+            "an unreported model renders nothing: {block}"
         );
     }
 

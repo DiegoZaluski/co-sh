@@ -236,6 +236,18 @@ impl App {
     /// closed). `set_coworkers` fails queued/orphaned requests of panes that
     /// left the set, so a removed pane never strands a waiter.
     pub(super) fn sync_agents_pane_registry(&mut self) {
+        // The manager (cosh) pane is the main agent itself: its bridge never
+        // emits an ACP `SessionModel` report, so `session_info` stays `None`
+        // for it no matter how many turns it ran — the model its turns run
+        // with is the GLOBAL config (the same `llm_config` the main loop
+        // reads). The fallback chain below consults it for manager panes
+        // only; an `auto` pick renders as `auto` (truthful: the routing
+        // chain serves the pane), an empty model renders nothing.
+        let global_model = self
+            .llm_config
+            .model
+            .clone()
+            .filter(|model| !model.is_empty());
         let panes: Vec<cosh::harness::agent_coworkers::AgentCoworkerDescriptor> =
             either_split(&self.agents_split, &self.parked_agents_split)
                 .map(|split| {
@@ -245,6 +257,8 @@ impl App {
                         .enumerate()
                         .filter_map(|(i, p)| {
                             let id = split.pane_registry_id(i)?;
+                            let is_manager = p.agent
+                                == crate::routes::session::agents_split::MANAGER_LABEL;
                             Some(cosh::harness::agent_coworkers::AgentCoworkerDescriptor {
                                 id,
                                 // The pane's IDENTITY rides the descriptor:
@@ -253,8 +267,7 @@ impl App {
                                 // vouch for a dead pane's traffic (Issue 3).
                                 coworker_id: p.id,
                                 agent: p.agent.clone(),
-                                is_manager: p.agent
-                                    == crate::routes::session::agents_split::MANAGER_LABEL,
+                                is_manager,
                                 bound: p.session_id.is_some(),
                                 // The worktree NAME (not the path) — the
                                 // context block renders it next to the pane
@@ -262,6 +275,37 @@ impl App {
                                 // same listing. `/worktree` keeps this in
                                 // sync right after each binding change.
                                 worktree: p.worktree.as_ref().map(|w| w.name.clone()),
+                                // The model the pane's session runs with —
+                                // what the ACP harness reported last
+                                // (`session_info`), falling back to the
+                                // pane's committed `/models` pick when the
+                                // harness has not reported yet. `None`
+                                // before the first turn: the context block
+                                // renders nothing rather than a guess.
+                                // An EMPTY reported model (a harness that
+                                // names its models with empty strings)
+                                // renders nothing either — same contract.
+                                model: p
+                                    .session_info
+                                    .as_ref()
+                                    .and_then(|info| info.model.clone())
+                                    .filter(|model| !model.is_empty())
+                                    .or_else(|| {
+                                        p.model_selection
+                                            .as_ref()
+                                            .map(|sel| sel.model.clone())
+                                            .filter(|model| !model.is_empty())
+                                    })
+                                    // A manager pane's turns run on the
+                                    // GLOBAL config (its bridge never
+                                    // reports a model, and a `/models`
+                                    // pick is optional) — the global model
+                                    // is the truthful answer for it, even
+                                    // rendered as `auto` (the routing chain
+                                    // serves the pane). ACP panes keep the
+                                    // no-guess contract: nothing reported,
+                                    // nothing rendered.
+                                    .or_else(|| is_manager.then(|| global_model.clone()).flatten()),
                             })
                         })
                         .collect()
