@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1]
+
+### Fixed
+
+- ACP: a goose pane no longer mixes old turns into a live one. Harnesses
+  that advertise `loadSession` without `sessionCapabilities.resume` (goose)
+  replay the retained conversation as ordinary `session/update` events
+  before every pane turn, and those chunks were mapped like live traffic,
+  polluting the pane's timeline and the turn's report. Replayed content is
+  now dropped inside the session-open window, while pane chrome still
+  passes and the rehydrate path keeps its unfiltered handler.
+
+- Harness: report-owing turns recover from improper stops instead of
+  ending with `incomplete`. The tool-loop detector's first firing grants
+  one steering recovery, a natural stop with open todos resumes to
+  reconcile the list first, and the checkup's natural-stop veto answers to
+  a dedicated budget of three re-sends instead of `MAX_ITERATIONS`. Every
+  accelerator re-checks the user's stop signal and is pane-scoped.
+
+- The `/agents` context block shows each coworker's model, filled from the
+  harness's last session report with the pane's committed `/models` pick
+  as fallback, so the listing never guesses.
+
+- Dialogs follow the mouse wheel: inside a dialog box it walks the scroll
+  list a row at a time, and outside it both the scroll and the frame are
+  left untouched.
+
 ## [0.2.0]
 
 ### Added
@@ -214,6 +241,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The same anchor-ownership contract covers the right-button correction
   drag. Covered by gesture regression tests driven through the real mouse
   pipeline in `tui::app::tests::prompt_selection_mouse`.
+
 - The `[Pasted ~N lines]` placeholder color no longer leaks into the
   text around it. The paste color was decided per wrapped line, so any
   line that merely overlapped the placeholder — ordinary text typed after
@@ -228,6 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the end of the shorter history. Both history navigation directions now
   clamp the carried index into range. Covered by regression tests in
   `tui::app::tests::history_panic_probe`.
+
 - Setup settings no longer vanish during sessions. `setup.json` saves were
   a plain whole-file rewrite with no locking: two cosh processes running
   side by side performed a lost update (the last save silently discarded
@@ -390,20 +419,27 @@ Initial release of **cosh** — a coding agent for the terminal.
 
 - File editing anchored on content-hash tags (`hashline` patch format) with
   all-or-nothing preflight, stale-tag recovery and per-target error warnings.
+
 - AST-aware structural editing (`ast-grep` + `tree-sitter`) with
   metavariable pattern rewrites.
+
 - Session rollback: every write records a file version; restore by hash,
   step back, or undo a restore.
+
 - Sandboxed path guarding: all paths are denied until the project root is
   set, with write and read-only allow/blocklists.
+
 - Streaming bash execution (PTY mode, timeouts, chunked stdout/stderr) with
   pre-spawn security validation.
+
 - Search (glob/grep), LSP integration (definitions, references, renames,
   hover, call hierarchy, passive diagnostics feedback), web fetch/search,
   planning, skills and structured user questions.
+
 - Computer tools: observe and drive native desktop applications through the
   OS accessibility tree (X11 and Wayland), with screenshots as fallback —
   fewer images processed, fewer tokens consumed.
+
 - Subagents via the Agent Client Protocol, dispatching to external harnesses
   (Gemini, Claude, Codex, Cline, Devin, Goose, OpenCode, Kilo) or an
   internal nested harness.
@@ -439,7 +475,8 @@ The agent's building blocks are published as reusable libraries:
 - Linux and Windows are tested. macOS builds are published but untested —
   report any issues with details.
 
-[0.2.0]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.4...HEAD
+[0.2.1]: https://github.com/DiegoZaluski/co-sh/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...v0.1.2
