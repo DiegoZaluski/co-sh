@@ -86,7 +86,6 @@ impl SessionView {
                 self.last_content_height = self.last_content_height.wrapping_sub(1);
                 return HeightCacheUpdate {
                     full_rebuild: false,
-                    tool_state_changed: false,
                 };
             }
             // An invalid snapshot was `take`n and dropped (its validation keys
@@ -235,7 +234,6 @@ impl SessionView {
                 );
                 HeightCacheUpdate {
                     full_rebuild: true,
-                    tool_state_changed,
                 }
             } else {
                 // Extend cache with new messages only (same width/config)
@@ -344,7 +342,6 @@ impl SessionView {
                 );
                 HeightCacheUpdate {
                     full_rebuild: false,
-                    tool_state_changed,
                 }
             }
         } else {

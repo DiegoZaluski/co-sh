@@ -1,11 +1,3 @@
-pub fn scroll_acceleration(config: &crate::config::TuiConfig) -> i32 {
-    if config.scroll_acceleration > 0.0 {
-        (config.scroll_acceleration * 3.0) as i32
-    } else {
-        3
-    }
-}
-
 pub fn collapse_tool_output(output: &str, max_lines: usize, max_chars: usize) -> Collapsed {
     let lines: Vec<&str> = output.lines().collect();
     if lines.len() <= max_lines && output.chars().count() <= max_chars {

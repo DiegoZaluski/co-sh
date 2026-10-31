@@ -190,76 +190,7 @@ impl HighlightSpinner {
         self
     }
 
-    /// Customise the width of the primary beam gaussian.
-    ///
-    /// Smaller = tighter, brighter core. Default: `0.08`.
-    pub fn with_primary_sigma(&mut self, sigma: f32) -> &mut Self {
-        self.primary_sigma = sigma.max(0.01);
-        self
-    }
-
-    /// Customise the width of the soft atmospheric glow.
-    ///
-    /// Default: `0.22`.
-    pub fn with_glow_sigma(&mut self, sigma: f32) -> &mut Self {
-        self.glow_sigma = sigma.max(0.01);
-        self
-    }
-
-    /// Customise the trailing-edge asymmetry.
-    ///
-    /// `1.0` = symmetric; larger values make the trailing glow wider.
-    /// Default: `2.0`.
-    pub fn with_trail_scale(&mut self, scale: f32) -> &mut Self {
-        self.trail_scale = scale.max(0.1);
-        self
-    }
-
-    /// Set the shimmer amplitude (0.0 disables shimmer).
-    ///
-    /// Default: `0.06` (±6 % oscillation).
-    pub fn with_shimmer_amp(&mut self, amp: f32) -> &mut Self {
-        self.shimmer_amp = amp.max(0.0);
-        self
-    }
-
     // Multi-message cycling
-
-    /// Replace the current message with a cycling set of messages.
-    ///
-    /// When multiple messages are provided, the spinner automatically
-    /// advances to the next one after `durations` frames have elapsed.
-    /// The cycle loops back to the first message after the last.
-    ///
-    /// * `texts` — the messages to cycle through (must not be empty).
-    /// * `durations` — optional per-message display durations in **frames**.
-    ///   If `None`, every message gets 400 frames (≈ 6.6 s at 60 fps).
-    ///   Pass an array shorter than `texts` and the remaining messages
-    ///   use the last given value.
-    pub fn with_messages(&mut self, texts: &[&str], durations: Option<&[u32]>) -> &mut Self {
-        if texts.is_empty() {
-            return self;
-        }
-        self.messages = texts.iter().map(|s| s.to_string()).collect();
-
-        // Build durations array, padding with the last value or a default.
-        self.durations = match durations {
-            Some(d) => {
-                let mut v = d.to_vec();
-                let last = v.last().copied().unwrap_or(400);
-                while v.len() < self.messages.len() {
-                    v.push(last);
-                }
-                v
-            }
-            None => vec![400; self.messages.len()],
-        };
-
-        self.current_idx = 0;
-        self.msg_frame_count = 0;
-        self.apply_current_message();
-        self
-    }
 
     /// Manually advance to the next message in the cycle (wraps around).
     ///
@@ -276,7 +207,7 @@ impl HighlightSpinner {
     /// Change the text mid-animation (resets beam position).
     ///
     /// This also replaces the message list with a single entry so
-    /// auto-cycling stops. Call [`with_messages`] again to re-enable it.
+    /// auto-cycling stops.
     pub fn set_text(&mut self, text: &str) {
         self.messages = vec![text.to_string()];
         self.durations = vec![u32::MAX];
@@ -377,52 +308,11 @@ impl HighlightSpinner {
         self.beam_pos = pos;
     }
 
-    /// Reset the animation to its initial state.
-    pub fn reset(&mut self) {
-        self.beam_pos = -0.3;
-        self.frame = 0;
-    }
-
     // Queries
-
-    /// Total width in terminal cells (equal to the character count).
-    pub fn width(&self) -> usize {
-        self.char_count
-    }
 
     /// The current text string (the currently active message).
     pub fn text(&self) -> &str {
         &self.text
-    }
-
-    /// Total number of messages in the cycle.
-    pub fn messages_count(&self) -> usize {
-        self.messages.len()
-    }
-
-    /// Index of the currently displayed message.
-    pub const fn current_index(&self) -> usize {
-        self.current_idx
-    }
-
-    /// Duration (in frames) of the currently displayed message.
-    pub fn current_duration(&self) -> u32 {
-        self.durations[self.current_idx]
-    }
-
-    /// Whether the beam is currently visible over any characters.
-    pub const fn is_beam_visible(&self) -> bool {
-        self.beam_pos > -0.3 && self.beam_pos < 1.3
-    }
-
-    /// The current beam position.
-    pub fn beam_pos(&self) -> f32 {
-        self.beam_pos
-    }
-
-    /// The current phase.
-    pub fn phase(&self) -> SpinnerPhase {
-        self.phase
     }
 
     // Rendering

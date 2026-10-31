@@ -213,11 +213,6 @@ impl ChatLogo {
         self.zzz_clock = 0.0;
     }
 
-    /// The logo's current health (0..=[`MAX_HEALTH`]).
-    pub const fn health(&self) -> u16 {
-        self.health
-    }
-
     /// Whether the logo is asleep (health reached zero).
     pub const fn is_asleep(&self) -> bool {
         self.health == 0
@@ -979,20 +974,20 @@ mod tests {
 
         // Top row: 50 damage.
         assert!(logo.click_logo(ox + cols[0] as u16, oy));
-        assert_eq!(logo.health(), MAX_HEALTH - 50);
+        assert_eq!(logo.health, MAX_HEALTH - 50);
 
         // Bottom row: 10 damage.
         assert!(logo.click_logo(ox + cols[3] as u16, oy + 3));
-        assert_eq!(logo.health(), MAX_HEALTH - 60);
+        assert_eq!(logo.health, MAX_HEALTH - 60);
 
         // Middle rows are proportional, strictly between the extremes.
-        let before = logo.health();
+        let before = logo.health;
         assert!(logo.click_logo(ox + cols[1] as u16, oy + 1));
-        let mid_top = before - logo.health();
+        let mid_top = before - logo.health;
         assert!(mid_top > 10 && mid_top < 50, "row 1 damage: {mid_top}");
-        let before = logo.health();
+        let before = logo.health;
         assert!(logo.click_logo(ox + cols[2] as u16, oy + 2));
-        let mid_bottom = before - logo.health();
+        let mid_bottom = before - logo.health;
         assert!(
             mid_bottom > 10 && mid_bottom < 50,
             "row 2 damage: {mid_bottom}"
@@ -1012,7 +1007,7 @@ mod tests {
         // One cell above and one cell to the left of the glyph do not count.
         assert!(!logo.click_logo(ox + 3, oy - 1));
         assert!(!logo.click_logo(ox - 1, oy + 1));
-        assert_eq!(logo.health(), MAX_HEALTH);
+        assert_eq!(logo.health, MAX_HEALTH);
     }
 
     #[test]
@@ -1025,20 +1020,20 @@ mod tests {
 
         // 9.9s without damage: no heal yet.
         logo.advance(9.9, 10.0, 9.0);
-        assert_eq!(logo.health(), MAX_HEALTH - 50);
+        assert_eq!(logo.health, MAX_HEALTH - 50);
 
         // Past the delay: the first +10 tick fires, with a heal float.
         logo.advance(1.1, 10.0, 9.0);
-        assert_eq!(logo.health(), MAX_HEALTH - 40);
+        assert_eq!(logo.health, MAX_HEALTH - 40);
         assert!(logo.floats.iter().any(|f| f.kind == FloatKind::Heal));
 
         // One tick per second while recovering.
         logo.advance(1.0, 10.0, 9.0);
-        assert_eq!(logo.health(), MAX_HEALTH - 30);
+        assert_eq!(logo.health, MAX_HEALTH - 30);
 
         // Health is capped at MAX_HEALTH even after a long idle stretch.
         logo.advance(30.0, 10.0, 9.0);
-        assert_eq!(logo.health(), MAX_HEALTH);
+        assert_eq!(logo.health, MAX_HEALTH);
     }
 
     #[test]
@@ -1053,7 +1048,7 @@ mod tests {
         for _ in 0..4 {
             assert!(logo.click_logo(ox + 1, oy));
         }
-        assert_eq!(logo.health(), 0);
+        assert_eq!(logo.health, 0);
         assert!(logo.is_asleep());
 
         // The position freezes: advancing no longer moves the glyph (kept

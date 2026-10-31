@@ -124,26 +124,12 @@ where
         self.save();
     }
 
-    /// Clear all revalidation flags (no persistence effect).
-    /// Should be called after a batch fetch completes, to clear flags for
-    /// providers that may have failed — their old cached data is preserved.
-    pub fn clear_all_revalidation(&mut self) {
-        self.revalidating.clear();
-    }
-
     /// Remove all revalidation flags and return the keys.
     ///
     /// Useful when failed providers should have their cached data
     /// invalidated rather than preserved.
     pub fn drain_revalidation(&mut self) -> Vec<K> {
         self.revalidating.drain().collect()
-    }
-
-    /// Reload the cache from disk, replacing all in-memory data.
-    pub fn reload(&mut self) {
-        if let Some(data) = Self::load_from_disk(&self.file_path) {
-            self.data = data;
-        }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

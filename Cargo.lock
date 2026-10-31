@@ -1478,7 +1478,6 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 name = "cosh"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "arboard",
  "chrono",
  "cosh-onnx",
@@ -1499,7 +1498,6 @@ dependencies = [
  "notify-rust",
  "open",
  "parking_lot",
- "pulldown-cmark",
  "ratatui",
  "rayon",
  "rcgen",
@@ -1507,7 +1505,6 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rustls",
- "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -1554,7 +1551,6 @@ dependencies = [
  "lancedb",
  "log",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1579,14 +1575,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ignore",
- "insta",
  "keyring",
  "libc",
  "log",
  "lru",
  "lsp-types",
  "memmap2",
- "miniz_oxide",
  "phf 0.13.1",
  "rayon",
  "regex",
@@ -1595,7 +1589,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2",
- "similar 3.1.1",
+ "similar",
  "smallvec",
  "tempfile",
  "thiserror 2.0.18",
@@ -4199,20 +4193,6 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "block-padding",
  "generic-array",
-]
-
-[[package]]
-name = "insta"
-version = "1.48.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
-dependencies = [
- "console",
- "once_cell",
- "regex",
- "similar 2.7.0",
- "strip-ansi-escapes",
- "tempfile",
 ]
 
 [[package]]
@@ -8138,12 +8118,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "similar"

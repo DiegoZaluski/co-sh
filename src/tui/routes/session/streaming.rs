@@ -22,7 +22,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 
 use cosh_tui::core::lib::rgba::ColorInput;
 use cosh_tui::core::renderable::Renderable;
@@ -31,7 +30,6 @@ use cosh_tui::core::renderables::markdown::{
 };
 
 use crate::theme::Theme;
-use crate::theme::rgba_color;
 
 use super::{conceal_text, sanitize_text};
 
@@ -274,10 +272,6 @@ impl StreamingTextCache {
         self.cells.content()
     }
 
-    pub(crate) fn split(&self) -> usize {
-        self.split
-    }
-
     /// Raw (pre-sanitize) bytes consumed so far — a cheap O(1) monotonic
     /// token that changes exactly when streamed content grows.
     pub(crate) fn raw_len(&self) -> usize {
@@ -438,11 +432,6 @@ fn is_list_marker(trimmed: &str) -> bool {
         }
         _ => false,
     }
-}
-
-/// Cheap style for background rows (used when resizing the message cache).
-pub(crate) fn bg_style(theme: &Theme) -> Style {
-    Style::default().bg(rgba_color(theme.background))
 }
 
 /// Lightweight snapshot of the streaming message's per-part heights, handed to

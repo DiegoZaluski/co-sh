@@ -107,13 +107,6 @@ impl SessionView {
 }
 
 impl SessionView {
-    /// Set scroll acceleration multiplier (default 3.0 = CustomSpeedScroll(3)).
-    pub fn set_scroll_accel(&mut self, accel: f64) {
-        self.scroll_accel = accel;
-    }
-}
-
-impl SessionView {
     /// Absolute scroll to position. Mirrors OpenCode's `scrollTo`.
     pub fn scroll_to(&mut self, position: i32) {
         let max_scroll = (self.actual_total_height - self.visible_height).max(0);
@@ -204,24 +197,6 @@ impl SessionView {
             return true;
         }
         self.scroll_y >= max_scroll.saturating_sub(1)
-    }
-}
-
-impl SessionView {
-    /// Apply sticky start (scroll to bottom). Mirrors OpenCode's `applyStickyStart("bottom")`.
-    /// Sets `is_applying_sticky_scroll` guard to prevent recursive sync.
-    pub(super) fn apply_sticky_start(&mut self) {
-        let was_applying = self.is_applying_sticky_scroll;
-        self.is_applying_sticky_scroll = true;
-
-        // Scroll to the cached bottom, not the actual scanned bottom,
-        // to prevent scroll jumping during streaming. The cached height
-        // is the stable source of truth for layout calculations.
-        let max_scroll = (self.cached_total_height - self.visible_height).max(0);
-        self.scroll_y = max_scroll;
-        self.is_sticky_bottom = true;
-
-        self.is_applying_sticky_scroll = was_applying;
     }
 }
 

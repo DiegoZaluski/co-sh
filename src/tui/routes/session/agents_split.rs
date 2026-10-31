@@ -1209,14 +1209,6 @@ impl AgentsSplitState {
         }
     }
 
-    /// Flag pane `pane`'s snapshot probe as in flight (focus arrived with
-    /// an empty cache). Out-of-range panes are ignored.
-    pub fn set_snapshot_loading(&mut self, pane: usize, loading: bool) {
-        if let Some(p) = self.panes.get_mut(pane) {
-            p.snapshot_loading = loading;
-        }
-    }
-
     /// The focused pane's slash-menu source: `None` when NO pane is
     /// focused. The MANAGER pane (cosh itself: an ACP probe would be
     /// meaningless) serves the TUI's OWN command set plus the synthesized
@@ -1462,17 +1454,6 @@ impl AgentsSplitState {
 /// Returns exactly `pane_count` rects (empty for 0), all inside `area` and
 /// pairwise non-overlapping. Degenerate areas may clamp panes to zero
 /// height/width; the last row may be narrower than the others.
-#[must_use]
-pub fn compute_layout(pane_count: usize, area: Rect) -> Vec<Rect> {
-    if pane_count == 0 {
-        return Vec::new();
-    }
-    if pane_count == 1 {
-        return vec![area];
-    }
-    compute_layout_with_maximized(pane_count, area, None)
-}
-
 /// The layout WITH an expanded pane: pane `maximized` takes the whole
 /// area, every other pane's slot collapses to a zero rect (the
 /// degenerate path `render_pane` already skips). Index positions are
@@ -1483,6 +1464,12 @@ pub fn compute_layout_with_maximized(
     area: Rect,
     maximized: Option<usize>,
 ) -> Vec<Rect> {
+    if pane_count == 0 {
+        return Vec::new();
+    }
+    if pane_count == 1 {
+        return vec![area];
+    }
     if let Some(i) = maximized
         && i < pane_count
     {
@@ -2923,7 +2910,7 @@ mod tests {
     /// no overlap, manager strip on top, and every cell covered at most once
     /// with only a small gap budget left uncovered.
     fn assert_layout_ok(pane_count: usize, area: Rect) {
-        let rects = compute_layout(pane_count, area);
+        let rects = compute_layout_with_maximized(pane_count, area, None);
         assert_eq!(rects.len(), pane_count, "n={pane_count} {area:?}");
 
         for r in &rects {
@@ -2999,14 +2986,14 @@ mod tests {
     #[test]
     fn single_pane_takes_the_whole_area() {
         let area = Rect::new(2, 2, 80, 24);
-        assert_eq!(compute_layout(1, area), vec![area]);
-        assert!(compute_layout(0, area).is_empty());
+        assert_eq!(compute_layout_with_maximized(1, area, None), vec![area]);
+        assert!(compute_layout_with_maximized(0, area, None).is_empty());
     }
 
     #[test]
     fn two_panes_split_into_equal_cells() {
         let area = Rect::new(0, 0, 80, 24);
-        let rects = compute_layout(2, area);
+        let rects = compute_layout_with_maximized(2, area, None);
         // BOTH panes are equal participants: equal height, side by side.
         assert_eq!(rects[0].height, rects[1].height, "equal row heights");
         assert_eq!(
@@ -3021,7 +3008,7 @@ mod tests {
     fn narrow_area_falls_back_to_two_rows() {
         // 7 panes at 60 cols: per-column width would be ~9 < 24 → 2 rows.
         let area = Rect::new(0, 0, 60, 20);
-        let rects = compute_layout(7, area);
+        let rects = compute_layout_with_maximized(7, area, None);
         let row_tops: Vec<u16> = rects.iter().map(|r| r.y).collect();
         let distinct: Vec<u16> = {
             let mut v = row_tops.clone();

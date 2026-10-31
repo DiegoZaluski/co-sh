@@ -25,7 +25,7 @@ fn dirs_sort_before_files_case_insensitive() {
     fs::write(root.join("Alpha_file.txt"), "").unwrap();
 
     let view = FileExplorerView::new(root.clone());
-    let names: Vec<String> = (0..view.len())
+    let names: Vec<String> = (0..view.entries.len())
         .map(|i| {
             view.entries[i]
                 .path
@@ -49,11 +49,11 @@ fn collapsed_dir_has_no_children_rows_until_expanded() {
     fs::write(root.join("sub/deeper/file.txt"), "").unwrap();
 
     let mut view = FileExplorerView::new(root.clone());
-    assert_eq!(view.len(), 1, "collapsed subdir shows one row");
+    assert_eq!(view.entries.len(), 1, "collapsed subdir shows one row");
     assert!(!view.entries[0].expanded);
 
     view.toggle_dir(&root.join("sub"));
-    assert_eq!(view.len(), 2, "expanded subdir shows its child");
+    assert_eq!(view.entries.len(), 2, "expanded subdir shows its child");
     assert_eq!(view.entries[1].depth, 1);
     assert_eq!(
         view.entries[1].path,
@@ -62,7 +62,7 @@ fn collapsed_dir_has_no_children_rows_until_expanded() {
     );
 
     view.toggle_dir(&root.join("sub"));
-    assert_eq!(view.len(), 1, "collapse hides children again");
+    assert_eq!(view.entries.len(), 1, "collapse hides children again");
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -86,9 +86,9 @@ fn enter_on_dir_toggles_without_action() {
 
     let mut view = FileExplorerView::new(root.clone());
     assert_eq!(view.handle_key(KeyCode::Enter), ExplorerAction::None);
-    assert_eq!(view.len(), 2, "dir expanded by Enter");
+    assert_eq!(view.entries.len(), 2, "dir expanded by Enter");
     assert_eq!(view.handle_key(KeyCode::Enter), ExplorerAction::None);
-    assert_eq!(view.len(), 1, "dir collapsed by second Enter");
+    assert_eq!(view.entries.len(), 1, "dir collapsed by second Enter");
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -106,7 +106,7 @@ fn left_collapses_expanded_dir_and_moves_selection_from_file_to_parent() {
     assert_eq!(view.selected_entry().unwrap().path, root.join("pkg"));
     // Left again collapses it.
     assert_eq!(view.handle_key(KeyCode::Left), ExplorerAction::None);
-    assert_eq!(view.len(), 1);
+    assert_eq!(view.entries.len(), 1);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -118,7 +118,7 @@ fn right_expands_collapsed_dir() {
     let mut view = FileExplorerView::new(root.clone());
     assert_eq!(view.handle_key(KeyCode::Right), ExplorerAction::None);
     assert!(view.entries[0].expanded);
-    assert_eq!(view.len(), 2);
+    assert_eq!(view.entries.len(), 2);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -131,14 +131,14 @@ fn unreadable_and_hidden_entries_do_not_panic() {
 
     let mut view = FileExplorerView::new(root.clone());
     view.toggle_dir(&root.join(".git"));
-    assert!(view.len() >= 3);
+    assert!(view.entries.len() >= 3);
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
 fn missing_root_yields_empty_tree() {
     let view = FileExplorerView::new(temp_root("missing-root").join("nope"));
-    assert!(view.is_empty());
+    assert!(view.entries.is_empty());
     assert_eq!(view.selected_entry(), None);
 }
 
@@ -278,7 +278,7 @@ fn right_scrolls_view_when_nothing_more_to_expand() {
         view.toggle_dir(&root.join(d));
     }
     // Select the deep file so its name is what we track on screen.
-    for _ in 0..view.len() {
+    for _ in 0..view.entries.len() {
         if view
             .selected_entry()
             .unwrap()

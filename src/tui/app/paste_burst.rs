@@ -312,13 +312,6 @@ impl PasteBurstState {
         })
     }
 
-    /// Whether the anchor already received the whole clipboard.
-    fn anchor_complete(&self) -> bool {
-        self.anchor
-            .as_ref()
-            .is_some_and(|a| a.pos_bytes == a.expected.len())
-    }
-
     /// Absorb a plain Enter as a paste line break: recorded in the shadow
     /// (the replay turns it into a real newline). An absorbed Enter is
     /// itself paste semantics — the run becomes replay-worthy.

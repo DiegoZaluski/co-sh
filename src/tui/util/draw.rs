@@ -86,34 +86,3 @@ pub fn draw_text_line_wide(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: 
         cx += w;
     }
 }
-
-/// Fill a rectangle with spaces and one style.
-pub fn fill_rect(buf: &mut Buffer, x: u16, y: u16, w: u16, h: u16, style: Style) {
-    for dy in 0..h {
-        let row = y + dy;
-        for dx in 0..w {
-            if let Some(cell) = buf.cell_mut((x + dx, row)) {
-                cell.set_char(' ');
-                cell.set_style(style);
-            }
-        }
-    }
-}
-
-/// Draw a section title in `fg` on `bg` at (`x`, `y`).
-pub fn section_title(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    title: &str,
-    bg: ratatui::style::Color,
-    fg: ratatui::style::Color,
-) {
-    for (i, ch) in title.chars().enumerate() {
-        let cx = x + i as u16;
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(Style::default().fg(fg).bg(bg));
-        }
-    }
-}

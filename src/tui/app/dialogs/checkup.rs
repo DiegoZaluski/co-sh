@@ -10,6 +10,7 @@ const CHECKUP_MODEL_OPTIONS: [&str; 3] = ["english", "multilingual", "typed-deci
 
 impl App {
     /// Open the checkup-model picker (Settings → Checkup model).
+    #[cfg(feature = "onnx")]
     pub(in crate::app) fn open_checkup_model_dialog(&mut self) {
         let current = self.setup.decision.model.kind_name().to_string();
         self.dialog.show(DialogType::CheckupModelList {
@@ -78,6 +79,7 @@ impl App {
 
     /// Open the checkup min-confidence input box (Settings → Checkup min
     /// confidence), prefilled with the configured floor (blank = default).
+    #[cfg(feature = "onnx")]
     pub(in crate::app) fn open_checkup_min_confidence_input(&mut self) {
         let floor = self.setup.decision.termination.min_confidence;
         let input = if (floor - 0.6).abs() < f64::EPSILON {

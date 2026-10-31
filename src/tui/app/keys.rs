@@ -1404,43 +1404,6 @@ impl App {
                         return Ok(false);
                     }
                 }
-                Some(crate::keymap::Action::ScrollUp) => {
-                    if self.sidebar_focused
-                        && self.sidebar.open
-                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                    {
-                        self.sidebar.select_prev(self.state.session_summaries.len());
-                    } else if self.is_in_right_panel(self.last_mouse_x) {
-                        self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
-                    } else if let Some(split) = self.agents_split.as_mut() {
-                        // /agents split: the keyboard scrolls the FOCUSED pane
-                        // (the same per-pane contract the wheel follows).
-                        split.scroll_focused_by(-3);
-                    } else {
-                        let vh = self.session_view.visible_height.max(1);
-                        let delta = -(vh as f64 / 5.0);
-                        self.session_view.scroll_by_raw(delta);
-                        self.session_view.reset_scroll_accumulator();
-                    }
-                }
-                Some(crate::keymap::Action::ScrollDown) => {
-                    if self.sidebar_focused
-                        && self.sidebar.open
-                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                    {
-                        self.sidebar.select_next(self.state.session_summaries.len());
-                    } else if self.is_in_right_panel(self.last_mouse_x) {
-                        self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
-                    } else if let Some(split) = self.agents_split.as_mut() {
-                        // /agents split: the keyboard scrolls the FOCUSED pane.
-                        split.scroll_focused_by(3);
-                    } else {
-                        let vh = self.session_view.visible_height.max(1);
-                        let delta = vh as f64 / 5.0;
-                        self.session_view.scroll_by_raw(delta);
-                        self.session_view.reset_scroll_accumulator();
-                    }
-                }
                 Some(crate::keymap::Action::ScrollUpPage) => {
                     if self.sidebar_focused
                         && self.sidebar.open
@@ -1545,14 +1508,6 @@ impl App {
                     } else {
                         self.dialog.show(DialogType::Shortcuts { scroll: 0 });
                     }
-                }
-                Some(
-                    crate::keymap::Action::NextSession
-                    | crate::keymap::Action::PrevSession
-                    | crate::keymap::Action::FocusInput
-                    | crate::keymap::Action::Quit,
-                ) => {
-                    // TBD
                 }
                 Some(crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm) => {
                     if let Some(dialog) = self.dialog.current()
@@ -1878,26 +1833,6 @@ impl App {
                         }
                     }
                 }
-                Some(crate::keymap::Action::ScrollToTop) => {
-                    if self.is_in_right_panel(self.last_mouse_x) {
-                        self.state.right_panel.reset_scroll();
-                    } else if let Some(split) = self.agents_split.as_mut() {
-                        // /agents split: jump the FOCUSED pane only.
-                        split.scroll_focused_to_top();
-                    } else {
-                        self.session_view.scroll_to(0);
-                    }
-                }
-                Some(crate::keymap::Action::ScrollToBottom) => {
-                    if self.is_in_right_panel(self.last_mouse_x) {
-                        self.state.right_panel.scroll_to_bottom();
-                    } else if let Some(split) = self.agents_split.as_mut() {
-                        // /agents split: re-engage the focused pane's follow.
-                        split.scroll_focused_to_bottom();
-                    } else {
-                        self.session_view.scroll_to_bottom();
-                    }
-                }
                 Some(crate::keymap::Action::ToggleConceal) => {
                     self.config.conceal = !self.config.conceal;
                 }
@@ -1959,22 +1894,6 @@ impl App {
                         .map(PromptView::user_message_texts)
                         .unwrap_or_default();
                     self.prompt_view.history_down(&user_msgs);
-                }
-                Some(crate::keymap::Action::ClearQueue) => {
-                    if let Some(id) = self.state.current_session_id.clone()
-                        && let Some(queues) = self.state.pending_queues.get_mut(&id)
-                    {
-                        queues.clear();
-                    }
-                    // Nothing left to acknowledge, resume or highlight —
-                    // and nothing still parked in the SHARED queue may reach
-                    // the running loop either.
-                    self.queued_input.clear();
-                    self.next_request_in_flight = false;
-                    self.queue_actions_deferred_start = false;
-                    self.edit_requeue_hint = None;
-                    self.edit_hold_queue = None;
-                    self.hovered_queue_row = None;
                 }
                 None => {
                     // Same ownership contract as the call site above: the

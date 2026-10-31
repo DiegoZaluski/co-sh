@@ -85,15 +85,6 @@ impl FileExplorerView {
         view
     }
 
-    /// Number of visible rows (mirrors what the last `refresh` built).
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Selected entry, if any.
     pub fn selected_entry(&self) -> Option<&ExplorerEntry> {
         self.entries.get(self.selection.selected_index)

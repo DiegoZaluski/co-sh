@@ -2878,15 +2878,6 @@ impl QuestionDialog {
         }
     }
 
-    /// Whether question `index` holds a submittable answer, per the same
-    /// contract as [`Self::build_answers`]: a committed-but-empty custom
-    /// answer or an empty Text input counts as unanswered, so the review
-    /// screen styles exactly what would actually be submitted.
-    fn has_answer(&self, index: usize) -> bool {
-        let answers = self.build_answers();
-        answers.get(index).is_some_and(Self::answer_has_value)
-    }
-
     /// Whether a single built answer carries a submittable value.
     fn answer_has_value(a: &AnswerItem) -> bool {
         match (&a.answer, &a.selected) {
@@ -2927,7 +2918,7 @@ impl QuestionDialog {
                 if s.single_selection == Some(custom) {
                     if s.custom.is_empty() {
                         // Committed with no text: not answerable as-is; the
-                        // review screen styles it as unanswered (has_answer).
+                        // review screen styles it as unanswered.
                         "(not answered)".into()
                     } else {
                         s.custom.value().to_owned()
@@ -3542,9 +3533,8 @@ mod tests {
         let answers = d.build_answers();
         assert_eq!(answers[0].selected, None);
         // The summary must not read as an answer: the review screen styles
-        // the row as unanswered (`has_answer`).
+        // the row as unanswered.
         assert_eq!(d.question_summary(0), "(not answered)");
-        assert!(!d.has_answer(0));
     }
 
     #[test]

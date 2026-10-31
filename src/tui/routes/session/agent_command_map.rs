@@ -42,8 +42,6 @@ pub enum ConfigTarget {
 pub struct CommandGroup {
     /// Stable group id (logs/tests).
     pub id: &'static str,
-    /// Human title of the standardized box.
-    pub title: &'static str,
     /// Human one-liner for the synthesized menu entry (see
     /// [`synthesized_group_commands`]).
     pub desc: &'static str,
@@ -60,21 +58,18 @@ pub struct CommandGroup {
 pub const COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         id: "models",
-        title: "Model",
         desc: "Switch the agent's model",
         names: &["models", "model", "llm"],
         target: Some(ConfigTarget::ByCategory("model")),
     },
     CommandGroup {
         id: "provider",
-        title: "Provider",
         desc: "Switch the agent's provider",
         names: &["provider", "providers"],
         target: Some(ConfigTarget::ById("provider")),
     },
     CommandGroup {
         id: "mode",
-        title: "Mode",
         desc: "Switch the session mode",
         names: &["mode", "modes"],
         target: Some(ConfigTarget::ByCategory("mode")),

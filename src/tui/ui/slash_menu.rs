@@ -286,14 +286,6 @@ impl SlashMenu {
     /// [`COMMAND_INVENTORY`] as "not cosh's" — so this is the single list a
     /// new command must be added to twice (here and in the inventory), which
     /// the guard test enforces.
-    #[must_use]
-    pub fn cosh_command_names() -> Vec<String> {
-        Self::cosh_commands()
-            .into_iter()
-            .map(|command| command.name)
-            .collect()
-    }
-
     /// Swap the command source to an agent's own list (the pane's cached
     /// snapshot, blocklist-filtered by the app layer). Resets selection.
     pub fn set_agent_commands(&mut self, commands: Vec<SlashCommand>) {
@@ -674,7 +666,10 @@ mod tests {
         // `/worktree` is part of the base list: it belongs to the MAIN agent
         // (whose menu IS this list) as much as to any pane, so the pane
         // sources must not append a second copy.
-        let menu_names = SlashMenu::cosh_command_names();
+        let menu_names: Vec<String> = SlashMenu::cosh_commands()
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
         let inventory_names: Vec<&str> = COMMAND_INVENTORY.iter().map(|(name, _)| *name).collect();
         for name in &menu_names {
             assert!(

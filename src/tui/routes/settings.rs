@@ -149,7 +149,8 @@ const AUTOMATION: SettingsSection = SettingsSection {
         SettingsItem {
             id: "checkup_termination",
             label: "Termination checkup",
-            description: "A local model reviews ambiguous loop stops and may resume the agent (local inference per turn)",
+            description:
+                "A local model reviews ambiguous loop stops and may resume the agent (local inference per turn)",
             kind: SettingKind::Switch(SwitchAction::Persist),
         },
         // The audit's resident model: which checkpoint the loader picks at
@@ -340,11 +341,11 @@ fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
         SettingKind::HookList(event) => setup.hooks.is_event_enabled(event),
         SettingKind::Switch(SwitchAction::Lsp) => setup.lsp,
         SettingKind::Switch(SwitchAction::Telemetry) => setup.telemetry,
-        SettingKind::Switch(SwitchAction::EffectiveContext) => setup.effective_context,
         #[cfg(feature = "onnx")]
         // The checkup renders as a choice ("off" / "on · checkpoint") but
         // its ON/OFF state is the switch itself.
         SettingKind::Switch(SwitchAction::Persist) => setup.decision.termination.enabled,
+        SettingKind::Switch(SwitchAction::EffectiveContext) => setup.effective_context,
         _ => false,
     }
 }

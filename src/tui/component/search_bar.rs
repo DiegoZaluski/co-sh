@@ -30,11 +30,6 @@ impl SearchBar {
         self.cursor.note_activity();
     }
 
-    pub fn clear(&mut self) {
-        self.filter.clear();
-        self.cursor.note_activity();
-    }
-
     pub const fn is_empty(&self) -> bool {
         self.filter.is_empty()
     }

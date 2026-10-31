@@ -40,12 +40,8 @@ pub enum UpdateStatus {
     /// Update available; the button is clickable.
     #[default]
     Idle,
-    /// The update pipeline is running; the button is disabled.
-    Updating,
     /// The update installed; the user must reopen cosh to apply it.
     Installed,
-    /// The update pipeline failed; the button becomes a retry.
-    Failed,
 }
 
 /// What a click on the banner means.
@@ -128,7 +124,7 @@ impl BannerView {
         let inside = |area: Option<Rect>| -> bool {
             area.is_some_and(|a| x >= a.x && x < a.right() && y >= a.y && y < a.bottom())
         };
-        if matches!(self.status, UpdateStatus::Idle | UpdateStatus::Failed)
+        if matches!(self.status, UpdateStatus::Idle)
             && inside(self.button_area)
         {
             return Some(BannerAction::StartUpdate);
@@ -162,7 +158,6 @@ impl BannerView {
         }
 
         let primary = rgba_color(theme.primary);
-        let muted = rgba_color(theme.text_muted);
         // Same white the router menu font uses — title, box border and the
         // changelog link all share it.
         let white = rgba_color(theme.text);
@@ -290,7 +285,7 @@ impl BannerView {
         // personalization comes later), left-aligned with the link.
         let button_y = rect.y + 2;
         match self.status {
-            UpdateStatus::Idle | UpdateStatus::Failed => {
+            UpdateStatus::Idle => {
                 self.button_area = Some(Rect::new(content_x, button_y, button_w, 1));
                 draw_text_line(
                     buf,
@@ -299,17 +294,6 @@ impl BannerView {
                     button_y,
                     content_w,
                     Style::default().fg(primary),
-                );
-            }
-            UpdateStatus::Updating => {
-                let label = "Updating\u{2026}";
-                draw_text_line(
-                    buf,
-                    label,
-                    content_x,
-                    button_y,
-                    content_w,
-                    Style::default().fg(muted),
                 );
             }
             UpdateStatus::Installed => {}

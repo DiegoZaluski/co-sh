@@ -2,15 +2,9 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Quit,
-    ScrollUp,
-    ScrollDown,
     ScrollUpPage,
     ScrollDownPage,
-    ScrollToTop,
-    ScrollToBottom,
     SendMessage,
-    FocusInput,
     ToggleSidebar,
     ToggleRightPanel,
     ToggleUsage,
@@ -27,15 +21,12 @@ pub enum Action {
     Interrupt,
     HistoryUp,
     HistoryDown,
-    NextSession,
-    PrevSession,
     ToggleMode,
     /// Cycle the active model's reasoning effort to the next level
     /// (Ctrl+R): walks the model's reasoning levels in display order and
     /// wraps back to the start — the same levels the reasoning sub-dialog
     /// of the /models picker offers.
     CycleReasoning,
-    ClearQueue,
     /// Maximize the Subagent section over the right panel (corner hint f1).
     MaximizeSubagent,
     /// Maximize the Bash section over the right panel (corner hint f2).

@@ -11,7 +11,6 @@ pub mod permission;
 pub mod question;
 pub mod queue_choice;
 pub mod right_panel;
-pub mod subagent_footer;
 #[cfg(test)]
 mod tests;
 
@@ -230,7 +229,6 @@ pub struct SessionView {
 #[derive(Clone, Copy, Default)]
 struct HeightCacheUpdate {
     full_rebuild: bool,
-    tool_state_changed: bool,
 }
 
 /// Who is asking [`SessionView::ensure_height_caches_fresh`] to run.

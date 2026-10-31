@@ -143,7 +143,6 @@ const BACK_LINK_TEXT: &str = "← esc";
 /// TODO: replace the URL with the real GitHub issues URL.
 const BUG_REPORT_TEXT: &str = "𓆦 bug report";
 const BUG_REPORT_URL: &str = "https://github.com/PLACEHOLDER-OWNER/PLACEHOLDER-REPO/issues";
-const FOOTER_HEIGHT: u16 = 1;
 
 /// When the session is empty (no messages), the prompt is centered horizontally
 /// with a width of `RATIO * main_area` but at least `MIN_WIDTH` characters wide.
@@ -661,14 +660,12 @@ pub struct App {
     /// Receiver for update-related background tasks: the boot-time GitHub
     /// release check and the completion of the update pipeline.
     update_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::update::UpdateEvent>,
-    /// Sender half of [`Self::update_event_rx`], cloned into the tasks.
+    /// Sender half of [`Self::update_event_rx`], kept (and cloned) so the
+    /// spawned update tasks can always send — dropped only with the app.
     update_event_tx: tokio::sync::mpsc::UnboundedSender<crate::update::UpdateEvent>,
     /// Changelog URL of the announced release (from the GitHub API response).
     /// Kept outside the banner so the view stays pure display state.
     update_changelog_url: Option<String>,
-    /// Whether the update pipeline is currently running in the background
-    /// (guards against double-clicks starting a second install).
-    update_in_progress: bool,
     /// Whether the terminal bell rings when an agent loop finishes.
     bell_enabled: bool,
     /// Whether the animated chat-logo plays on the empty-session landing
@@ -1002,7 +999,6 @@ impl App {
             update_event_rx,
             update_event_tx,
             update_changelog_url: None,
-            update_in_progress: false,
             bell_enabled: saved_bell,
             anim_enabled: saved_anim,
             #[cfg(test)]
@@ -1387,11 +1383,6 @@ impl App {
             }
         }
         has.then_some(total)
-    }
-
-    /// Sum the resolved costs of `records`; `None` when none resolved.
-    fn sum_cost(records: &[crate::usage::UsageRecord]) -> Option<f64> {
-        Self::sum_cost_iter(records.iter())
     }
 
     /// Resolve a request's recorded cost as `(value, reported)`.

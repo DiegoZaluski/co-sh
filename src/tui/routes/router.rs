@@ -18,7 +18,6 @@ const MODEL_LIST_TOP_OFFSET: u16 = 4;
 const FALLBACK_LIST_TOP_OFFSET: u16 = 2;
 const VISIBLE_COUNT: usize = 20;
 const ROUTER_SECTION_GAP: u16 = 1;
-const AUTO_ROUTER_MIN_HEIGHT: u16 = 6;
 const TAB_BAR_HEIGHT: u16 = 1;
 const ACP_LIST_TOP_OFFSET: u16 = 2;
 // Title row, one blank gap row, the search bar, then the list.
@@ -430,10 +429,6 @@ impl RouterView {
 
     pub fn close_acp_picker(&mut self) {}
 
-    pub fn toggle_acp_picker(&mut self) {
-        self.focus = FocusTarget::PromptCorrectorAcp;
-    }
-
     pub fn cycle_focus(&mut self) {
         self.focus = match self.focus {
             FocusTarget::Models => FocusTarget::Fallbacks,
@@ -700,10 +695,6 @@ impl RouterView {
         if self.fallback_scroll_offset > 0 && self.fallback_scroll_offset >= self.fallbacks.len() {
             self.fallback_scroll_offset = self.fallbacks.len().saturating_sub(VISIBLE_COUNT);
         }
-    }
-
-    fn prompt_corrector_height(&self, body_h: u16) -> u16 {
-        body_h
     }
 
     /// Tab bar on the first row; the active section fills the rest. Only

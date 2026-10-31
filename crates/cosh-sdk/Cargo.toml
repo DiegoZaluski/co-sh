@@ -24,7 +24,6 @@ libc = "0.2"
 log = "0.4"
 lru = "0.18"
 memmap2 = "0.9.9"
-miniz_oxide = "0.8"
 rayon = "1"
 regex = "1"
 serde_json = "1.0.150"
@@ -149,10 +148,8 @@ thiserror = "2"
 
 [dev-dependencies]
 env_logger = "0.11"
-insta = { version = "1", features = ["filters"] }
 serial_test = "3"
 tempfile = "3"
-ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
 
 [lints]
 workspace = true

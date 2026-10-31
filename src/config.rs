@@ -1,6 +1,5 @@
 #[allow(clippy::struct_excessive_bools)]
 pub struct TuiConfig {
-    pub scroll_acceleration: f64,
     pub show_scrollbar: bool,
     pub conceal: bool,
     pub show_tool_details: bool,
@@ -18,7 +17,6 @@ pub struct TuiConfig {
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
-            scroll_acceleration: 1.0,
             show_scrollbar: false,
             conceal: false,
             show_tool_details: true,

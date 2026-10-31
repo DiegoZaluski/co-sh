@@ -5,10 +5,7 @@ use lru::LruCache;
 
 use crate::routes::session::right_panel::types::RightPanelState;
 use crate::session::store::SessionSummary;
-use crate::types::{
-    FilePart, Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart,
-    ToolPart, ToolStatus,
-};
+use crate::types::{Session, SessionStatus};
 use cosh::harness::Mode;
 
 const SESSION_CACHE_SIZE: usize = 10;
@@ -34,14 +31,6 @@ impl PendingQueues {
     /// Total number of queued messages across both queues.
     pub fn queued_count(&self) -> usize {
         self.next_request.len() + self.next_loop.len()
-    }
-
-    /// All queued messages in FIFO order: next_request first, then next_loop.
-    pub fn queued_list(&self) -> impl Iterator<Item = &str> {
-        self.next_request
-            .iter()
-            .chain(self.next_loop.iter())
-            .map(String::as_str)
     }
 
     /// Clear all queued messages from both queues.
@@ -74,7 +63,6 @@ pub struct AppState {
     /// Refreshed by the app loop via the git branch tracker.
     pub git_branch: Option<String>,
     pub mode: Mode,
-    pub connected: bool,
     /// Whether LSP is enabled at all (`COSH_LSP`). Distinct from how many
     /// servers are running — the footer shows "disabled" only when false.
     pub lsp_available: bool,
@@ -101,7 +89,6 @@ impl AppState {
             working_directory: String::new(),
             git_branch: None,
             mode: Mode::Build,
-            connected: false,
             lsp_available: false,
             lsp_servers: Vec::new(),
             mcp_count: 0,
@@ -321,10 +308,6 @@ impl AppState {
         true
     }
 
-    pub fn max_scroll(&self) -> i32 {
-        (self.content_height - 10).max(0)
-    }
-
     pub fn unique_agents(&self) -> Vec<String> {
         let mut seen = Vec::new();
         if let Some(session) = self.current_session() {
@@ -337,264 +320,5 @@ impl AppState {
             }
         }
         seen
-    }
-
-    /// Update the message count in the summary for the current session.
-    /// Called after a new message is appended during streaming.
-    pub fn update_summary_msg_count(&mut self) {
-        if let Some(id) = self.current_session_id.as_ref()
-            && let Some(session) = self.session_cache.get(id.as_str())
-        {
-            let count = session.messages.len();
-            if let Some(summary) = self
-                .session_summaries
-                .iter_mut()
-                .find(|s| s.session_id == *id)
-            {
-                summary.message_count = count;
-            }
-        }
-    }
-
-    pub fn add_demo_data(&mut self) {
-        let session = Session {
-            id: "demo-1".to_string(),
-            title: "Demo Session".to_string(),
-            created_at: 1000,
-            title_generated: false,
-            provider: None,
-            model: None,
-            reasoning: None,
-            agents_panes: None,
-            agents_mode_open: false,
-            agents_hidden: Vec::new(),
-            ctx_ids: Default::default(),
-            main_agent_worktree: None,
-            messages: vec![
-                Message {
-                    id: "msg-1".to_string(),
-                    role: MessageRole::User,
-                    agent: Some("build".to_string()),
-                    model: None,
-                    parts: vec![Part::Text(TextPart {
-                        text: "Hi! Can you help me write a Rust CLI tool that processes JSON files?"
-                            .to_string(),
-                        synthetic: false,
-                    })],
-                    created_at: 1000,
-                },
-                Message {
-                    id: "msg-2".to_string(),
-                    role: MessageRole::Assistant,
-                    agent: None,
-                    model: Some("claude-3.5-sonnet".to_string()),
-                    parts: vec![
-                        Part::Text(TextPart {
-                            text: "I'd be happy to help! Let me first **look at what files** you have in the project."
-                                .to_string(),
-                            synthetic: false,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "glob".to_string(),
-                            input: serde_json::json!({"pattern": "**/*.rs", "path": "."}),
-                            output: Some(
-                                "src/main.rs\nsrc/lib.rs\nsrc/config.rs\nsrc/processor.rs"
-                                    .to_string(),
-                            ),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("glob-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                        Part::File(FilePart {
-                            filename: "src/main.rs".to_string(),
-                            mime: "text/x-rust".to_string(),
-                        }),
-                        Part::File(FilePart {
-                            filename: "src/lib.rs".to_string(),
-                            mime: "text/x-rust".to_string(),
-                        }),
-                    ],
-                    created_at: 2000,
-                },
-                Message {
-                    id: "msg-3".to_string(),
-                    role: MessageRole::User,
-                    agent: Some("editor".to_string()),
-                    model: None,
-                    parts: vec![Part::Text(TextPart {
-                        text: "Let me read the current main.rs to understand the structure."
-                            .to_string(),
-                        synthetic: false,
-                    })],
-                    created_at: 3000,
-                },
-                Message {
-                    id: "msg-4".to_string(),
-                    role: MessageRole::Assistant,
-                    agent: None,
-                    model: Some("claude-3.5-sonnet".to_string()),
-                    parts: vec![
-                        Part::Reasoning(ReasoningPart {
-                            text: "The user wants a CLI tool for JSON processing. I should check what dependencies are available and look at the current code structure before suggesting changes."
-                                .to_string(),
-                            collapsed: true,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "read".to_string(),
-                            input: serde_json::json!({"filePath": "src/main.rs"}),
-                            output: Some(
-                                "fn main() {\n    println!(\"Hello, world!\");\n}".to_string(),
-                            ),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("read-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "grep".to_string(),
-                            input: serde_json::json!({"pattern": "serde|clap|json", "path": "Cargo.toml"}),
-                            output: Some(String::new()),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("grep-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                        Part::Text(TextPart {
-                            text: "I can see you have a basic Rust project. Let me add **clap** for CLI argument parsing and **serde_json** for JSON processing."
-                                .to_string(),
-                            synthetic: false,
-                        }),
-                    ],
-                    created_at: 4000,
-                },
-                Message {
-                    id: "msg-5".to_string(),
-                    role: MessageRole::Assistant,
-                    agent: None,
-                    model: Some("claude-3.5-sonnet".to_string()),
-                    parts: vec![
-                        Part::Text(TextPart {
-                            text: "First, let me add the dependencies to Cargo.toml:".to_string(),
-                            synthetic: false,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "write".to_string(),
-                            input: serde_json::json!({"filePath": "src/main.rs", "content": "use clap::Parser;\nuse serde_json::Value;\n\n#[derive(Parser)]\nstruct Args {\n    file: String,\n    #[arg(short, long)]\n    pretty: bool,\n}\n\nfn main() {\n    let args = Args::parse();\n    let content = std::fs::read_to_string(&args.file).unwrap();\n    let json: Value = serde_json::from_str(&content).unwrap();\n    if args.pretty {\n        println!(\"{}\", serde_json::to_string_pretty(&json).unwrap());\n    } else {\n        println!(\"{}\", content);\n    }\n}".to_string()}),
-                            output: Some(
-                                "fn main() {\n    println!(\"Hello, world!\");\n}".to_string(),
-                            ),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("write-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                        Part::Text(TextPart {
-                            text: "Now let me also add the Cargo.toml changes:".to_string(),
-                            synthetic: false,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "edit".to_string(),
-                            input: serde_json::json!({"filePath": "Cargo.toml", "oldString": "[dependencies]", "newString": "[dependencies]\nclap = { version = \"4\", features = [\"derive\"] }\nserde_json = \"1\""}),
-                            output: Some(
-                                "--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1,2 +1,4 @@\n [dependencies]\n+clap = { version = \"4\", features = [\"derive\"] }\n+serde_json = \"1\""
-                                    .to_string(),
-                            ),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("edit-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                    ],
-                    created_at: 5000,
-                },
-                Message {
-                    id: "msg-6".to_string(),
-                    role: MessageRole::User,
-                    agent: Some("build".to_string()),
-                    model: None,
-                    parts: vec![Part::Text(TextPart {
-                        text: "That looks great! Can you also add error handling with proper messages?"
-                            .to_string(),
-                        synthetic: false,
-                    })],
-                    created_at: 6000,
-                },
-                Message {
-                    id: "msg-7".to_string(),
-                    role: MessageRole::Assistant,
-                    agent: None,
-                    model: Some("claude-3.5-sonnet".to_string()),
-                    parts: vec![
-                        Part::Reasoning(ReasoningPart {
-                            text: "The user wants better error handling. I should use anyhow or create proper error messages with context. Let me update the main.rs to use expect() with meaningful messages."
-                                .to_string(),
-                            collapsed: false,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "shell".to_string(),
-                            input: serde_json::json!({"command": "cargo check 2>&1"}),
-                            output: Some(
-                                "    Checking json-processor v0.1.0\n    Finished dev profile [unoptimized + debuginfo] target(s) in 0.32s"
-                                    .to_string(),
-                            ),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("shell-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                        Part::Text(TextPart {
-                            text: "The project compiles! Let me now add proper error handling:"
-                                .to_string(),
-                            synthetic: false,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "edit".to_string(),
-                            input: serde_json::json!({"filePath": "src/main.rs", "oldString": "fn main() {\n    let args = Args::parse();\n    let content = std::fs::read_to_string(&args.file).unwrap();\n    let json: Value = serde_json::from_str(&content).unwrap();\n    if args.pretty {\n        println!(\"{}\", serde_json::to_string_pretty(&json).unwrap());\n    } else {\n        println!(\"{}\", content);\n    }\n}", "newString": "fn main() {\n    let args = Args::parse();\n    let content = std::fs::read_to_string(&args.file)\n        .expect(\"failed to read input file\");\n    let json: Value = serde_json::from_str(&content)\n        .expect(\"input is not valid JSON\");\n    if args.pretty {\n        println!(\"{}\", serde_json::to_string_pretty(&json).unwrap());\n    } else {\n        println!(\"{}\", content);\n    }\n}"}),
-                            output: Some(String::new()),
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("edit-2".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                        Part::Tool(ToolPart {
-                            tool: "websearch".to_string(),
-                            input: serde_json::json!({"query": "rust clap CLI tutorial 2025", "provider": "parallel"}),
-                            output: None,
-                            status: ToolStatus::Completed,
-                            tool_call_id: Some("web-1".to_string()),
-                            is_start: false,
-                            is_streaming: false,
-                            cached_line_count: None,
-                            lsp_notes: None,
-                        }),
-                    ],
-                    created_at: 7000,
-                },
-            ],
-        };
-        self.add_session(session);
-        self.current_session_id = Some("demo-1".to_string());
-        self.working_directory = "~/cosh".to_string();
-        self.connected = true;
-        self.lsp_available = true;
-        self.lsp_servers = vec!["rust-analyzer".to_string(), "gopls".to_string()];
-        self.mcp_count = 0;
-        self.mcp_errors = 0;
-        self.permission_count = 1;
     }
 }
