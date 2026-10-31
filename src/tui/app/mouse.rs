@@ -83,7 +83,10 @@ impl App {
         // panes, the slash menu or the transcript can react — but never
         // before an open dialog box (see `dialog_box_open` above).
         if !dialog_box_open && self.agents_picker.visible {
-            match self.agents_picker.handle_mouse(&mouse, self.terminal_size()) {
+            match self
+                .agents_picker
+                .handle_mouse(&mouse, self.terminal_size())
+            {
                 crate::ui::agents_picker::AgentsPickerAction::Confirmed(agents) => {
                     self.open_agents_split(agents);
                     return Ok(true);
@@ -107,7 +110,10 @@ impl App {
         if !dialog_box_open
             && matches!(
                 event_type,
-                MouseEventType::Down | MouseEventType::Up | MouseEventType::ScrollUp | MouseEventType::ScrollDown
+                MouseEventType::Down
+                    | MouseEventType::Up
+                    | MouseEventType::ScrollUp
+                    | MouseEventType::ScrollDown
             )
         {
             // Resolve the target pane against the LAST frame's hit rects
@@ -115,7 +121,10 @@ impl App {
             // nothing, so the branches below can take `&mut` freely.
             let target = self.agents_split.as_ref().and_then(|split| {
                 let index = split.pane_rects.iter().position(|rect| {
-                    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+                    x >= rect.x
+                        && x < rect.x + rect.width
+                        && y >= rect.y
+                        && y < rect.y + rect.height
                 })?;
                 let rect = *split.pane_rects.get(index)?;
                 Some((index, rect))
@@ -126,34 +135,30 @@ impl App {
                 // FOCUSED pane's box is answerable; a click on another
                 // pane's box just focuses that pane (its box becomes
                 // answerable).
-                if matches!(event_type, MouseEventType::Down) && button == MouseButton::Left
-                    && self.agents_split.as_ref().is_some_and(|split| {
-                        split.pending_permission(index).is_some()
-                    })
+                if matches!(event_type, MouseEventType::Down)
+                    && button == MouseButton::Left
+                    && self
+                        .agents_split
+                        .as_ref()
+                        .is_some_and(|split| split.pending_permission(index).is_some())
                 {
                     let clicked = self.agents_split.as_ref().and_then(|split| {
                         let request = split.pending_permission(index)?;
-                        let dialog =
-                            crate::routes::session::permission::PanePermissionDialog {
-                                tool: String::new(),
-                                description: request.title.clone(),
-                                args: String::new(),
-                                options: request
-                                    .options
-                                    .iter()
-                                    .map(|o| o.name.clone())
-                                    .collect(),
-                                option_kinds: request
-                                    .options
-                                    .iter()
-                                    .map(|o| o.kind.clone())
-                                    .collect(),
-                                selected: request.selected,
-                            };
+                        let dialog = crate::routes::session::permission::PanePermissionDialog {
+                            tool: String::new(),
+                            description: request.title.clone(),
+                            args: String::new(),
+                            options: request.options.iter().map(|o| o.name.clone()).collect(),
+                            option_kinds: request.options.iter().map(|o| o.kind.clone()).collect(),
+                            selected: request.selected,
+                        };
                         dialog.clicked_option(y, rect)
                     });
                     if let Some(row) = clicked
-                        && self.agents_split.as_ref().is_some_and(|split| split.focused == Some(index))
+                        && self
+                            .agents_split
+                            .as_ref()
+                            .is_some_and(|split| split.focused == Some(index))
                     {
                         let option_id = self
                             .agents_split
@@ -182,7 +187,8 @@ impl App {
                 // jumps that pane back to the live tail and re-engages its
                 // auto-follow. Checked before focus/selection — the pill is
                 // a button, not a selection anchor.
-                if matches!(event_type, MouseEventType::Down) && button == MouseButton::Left
+                if matches!(event_type, MouseEventType::Down)
+                    && button == MouseButton::Left
                     && let Some(split) = &mut self.agents_split
                     && split.click_pill(x, y)
                 {
@@ -235,9 +241,7 @@ impl App {
                                     *pane == index && at.elapsed() <= DOUBLE_CLICK
                                 })
                                 .is_some();
-                        if double
-                            && let Some(split) = &mut self.agents_split
-                        {
+                        if double && let Some(split) = &mut self.agents_split {
                             split.toggle_maximized();
                             return Ok(true);
                         }
@@ -314,9 +318,7 @@ impl App {
                             // FIRES the click: the Message Actions dialog
                             // (Revert/Fork/Copy on the pane session), the
                             // chat's pending_message_action contract.
-                            if !was_drag
-                                && let Some((pane, hit)) = split.take_input_action()
-                            {
+                            if !was_drag && let Some((pane, hit)) = split.take_input_action() {
                                 self.open_pane_message_actions(pane, hit);
                             }
                             return Ok(true);
@@ -631,11 +633,9 @@ impl App {
                 // to the ANCHOR pane (the content row is resolved through the
                 // pane's render scroll, so the band follows scrolling) and
                 // re-arms drag auto-scroll for the pointer's edge zone.
-                if self
-                    .agents_split
-                    .as_ref()
-                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::has_selection)
-                {
+                if self.agents_split.as_ref().is_some_and(
+                    crate::routes::session::agents_split::AgentsSplitState::has_selection,
+                ) {
                     if let Some(split) = &mut self.agents_split {
                         split.update_selection_at(x, y);
                         split.update_auto_scroll(y);
@@ -907,11 +907,9 @@ impl App {
                     // its anchor pane (releases INSIDE the pane are consumed
                     // by the pane branch above). The drag rule applies: a bare
                     // click never copies, and the selection is always consumed.
-                    if self
-                        .agents_split
-                        .as_ref()
-                        .is_some_and(crate::routes::session::agents_split::AgentsSplitState::has_selection)
-                    {
+                    if self.agents_split.as_ref().is_some_and(
+                        crate::routes::session::agents_split::AgentsSplitState::has_selection,
+                    ) {
                         if let Some(split) = &mut self.agents_split {
                             if split.is_drag() {
                                 let text = split.extract_selected_text();
@@ -1237,16 +1235,12 @@ impl App {
         if matches!(
             event_type,
             MouseEventType::Move | MouseEventType::Drag | MouseEventType::Down
-        ) && self
-            .dialog
-            .current()
-            .is_some_and(|d| {
-                matches!(
-                    &d.dialog_type,
-                    DialogType::ModelList { .. } | DialogType::AgentConfigList { .. }
-                )
-            })
-        {
+        ) && self.dialog.current().is_some_and(|d| {
+            matches!(
+                &d.dialog_type,
+                DialogType::ModelList { .. } | DialogType::AgentConfigList { .. }
+            )
+        }) {
             let area = self.terminal_size();
             self.dialog.handle_mouse(&mouse, area, &self.theme);
             return Ok(true);
@@ -1279,7 +1273,18 @@ impl App {
         }
 
         // Only handle left-click UP events (standard "click" action)
+        // Exception: mouse wheel scroll events should be handled for dialogs
         if event_type != MouseEventType::Up || button != MouseButton::Left {
+            // Forward scroll events to dialogs (especially Shortcuts dialog)
+            if matches!(
+                event_type,
+                MouseEventType::ScrollUp | MouseEventType::ScrollDown
+            ) && self.dialog.visible()
+            {
+                let area = self.terminal_size();
+                self.dialog.handle_mouse(&mouse, area, &self.theme);
+                return Ok(true);
+            }
             // Hover tracking for user messages and pending-queue rows
             // (opencode-style highlight). Moving over the left panel clears any
             // leftover chat highlight instead of leaving it "lit".
@@ -1319,9 +1324,7 @@ impl App {
                                 &self.state.status,
                             );
                         }
-                    } else if matches!(self.mode(), AppMode::Session)
-                        && self.is_in_right_panel(x)
-                    {
+                    } else if matches!(self.mode(), AppMode::Session) && self.is_in_right_panel(x) {
                         // The cursor is over the right panel, not chat content:
                         // clear any leftover chat highlight.
                         self.session_view.clear_hover();
@@ -2104,14 +2107,12 @@ impl App {
                     Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
                         self.open_mcp_form();
                     }
-                    Some(
-                        crate::routes::settings::SettingsAction::OpenAcpFormFor { index },
-                    ) => {
+                    Some(crate::routes::settings::SettingsAction::OpenAcpFormFor { index }) => {
                         self.open_acp_form(index);
                     }
-                    Some(
-                        crate::routes::settings::SettingsAction::OpenProviderFormFor { index },
-                    ) => {
+                    Some(crate::routes::settings::SettingsAction::OpenProviderFormFor {
+                        index,
+                    }) => {
                         self.open_provider_form(index);
                     }
                     None => {}

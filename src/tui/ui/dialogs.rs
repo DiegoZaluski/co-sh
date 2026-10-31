@@ -93,18 +93,14 @@ pub(crate) fn model_entry_matches_filter(entry: &ModelEntry, filter: &str) -> bo
 /// convention). The AgentConfigList render arm uses this; the mouse arm
 /// and the keyboard handler re-derive the SAME rows through it, so the
 /// painted list, the hit-test and the Enter target can never drift.
-pub(crate) fn filter_matches(
-    options: &[(String, String)],
-    filter: &str,
-) -> Vec<(String, String)> {
+pub(crate) fn filter_matches(options: &[(String, String)], filter: &str) -> Vec<(String, String)> {
     options
         .iter()
         .filter(|(value, name)| {
             // The component's shared convention, applied per field: a value
             // matches when either its id or its display name contains the
             // filter.
-            list_dialog::matches_filter(filter, value)
-                || list_dialog::matches_filter(filter, name)
+            list_dialog::matches_filter(filter, value) || list_dialog::matches_filter(filter, name)
         })
         .cloned()
         .collect()
@@ -1197,8 +1193,16 @@ impl DialogState {
                 // hit-test (theme box: preferred 40, floor 24, 10-row cap) —
                 // the scroll window and the row mapping can never drift from
                 // the painted frame.
-                let layout =
-                    list_dialog::compute_layout(selection, filtered.len(), 10, 40, 24, area, false, true);
+                let layout = list_dialog::compute_layout(
+                    selection,
+                    filtered.len(),
+                    10,
+                    40,
+                    24,
+                    area,
+                    false,
+                    true,
+                );
                 match list_dialog::hit_test(&layout, x, y_click) {
                     MouseHit::Outside | MouseHit::Dismiss => return DialogAction::Dismissed,
                     MouseHit::Inside => return DialogAction::Consumed,
@@ -1744,6 +1748,28 @@ impl DialogState {
                     ..
                 } = layout;
 
+                // Mouse wheel scroll
+                if matches!(
+                    mouse.event_type,
+                    MouseEventType::ScrollUp | MouseEventType::ScrollDown
+                ) {
+                    // Check if mouse is inside dialog
+                    if x >= dialog_x
+                        && x < dialog_x + dialog_w
+                        && y_click >= dialog_y
+                        && y_click < dialog_y + dialog_h
+                    {
+                        let max_scroll = SHORTCUTS.len().saturating_sub(max_visible);
+                        if matches!(mouse.event_type, MouseEventType::ScrollUp) {
+                            *scroll = scroll.saturating_sub(1);
+                        } else {
+                            *scroll = (*scroll + 1).min(max_scroll);
+                        }
+                        return DialogAction::Consumed;
+                    }
+                    return DialogAction::None;
+                }
+
                 // Click outside → dismiss
                 if x < dialog_x
                     || x >= dialog_x + dialog_w
@@ -2095,8 +2121,16 @@ impl DialogState {
                 // clamped geometry, the Search line with the blinking
                 // cursor, the scroll window that follows the selection
                 // (theme box: preferred 40, floor 24, 10-row cap).
-                let layout =
-                    list_dialog::compute_layout(selection, rows.len(), 10, 40, 24, area, false, true);
+                let layout = list_dialog::compute_layout(
+                    selection,
+                    rows.len(),
+                    10,
+                    40,
+                    24,
+                    area,
+                    false,
+                    true,
+                );
                 list_dialog::render_chrome_raw(
                     buf,
                     &layout,
@@ -4008,8 +4042,9 @@ fn panel_static_demand(
     placeholder: fn(usize) -> &'static str,
     field_count: usize,
 ) -> usize {
-    let label_rows =
-        (0..field_count).map(|field| format!(" {} ", label(field)).chars().count() + 1 + hint(field).chars().count());
+    let label_rows = (0..field_count).map(|field| {
+        format!(" {} ", label(field)).chars().count() + 1 + hint(field).chars().count()
+    });
     let placeholders = (0..field_count).map(|field| placeholder(field).chars().count());
     let esc_row = title.chars().count() + 1 + 3; // title + gap + "esc"
     [esc_row, subtitle.chars().count()]
@@ -4229,8 +4264,7 @@ fn focus_form_field(
         // rule as the other text-input dialogs).
         return DialogAction::Dismissed;
     }
-    if let Some((clicked_field, char_idx)) =
-        form_panel_hit_field(area, demand, values, x, y_click)
+    if let Some((clicked_field, char_idx)) = form_panel_hit_field(area, demand, values, x, y_click)
     {
         *field = clicked_field;
         *cursor_pos = match char_idx {
@@ -4271,14 +4305,7 @@ fn render_form_panel(
     cursor_pos: usize,
     selection: Option<DragSelection<usize>>,
 ) {
-    let demand = panel_static_demand(
-        title,
-        subtitle,
-        label,
-        hint,
-        placeholder,
-        fields.len(),
-    );
+    let demand = panel_static_demand(title, subtitle, label, hint, placeholder, fields.len());
     let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
         form_panel_metrics(area, demand, fields);
     let content_w = cols as u16;
@@ -4515,13 +4542,7 @@ mod hook_panel_tests {
 
         // Label row focuses the field without moving the cursor.
         assert_eq!(
-            form_panel_hit_field(
-                area,
-                demand,
-                &values,
-                content_x + 2,
-                geoms[0].label_y,
-            ),
+            form_panel_hit_field(area, demand, &values, content_x + 2, geoms[0].label_y,),
             Some((0, None))
         );
         // Value row positions the cursor at the clicked character.
@@ -4563,7 +4584,8 @@ mod hook_panel_tests {
             .stack
             .last()
             .map_or(0, |d| dialog_panel_demand(Some(&d.dialog_type)));
-        let (_dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, &values);
+        let (_dialog_x, dialog_y, _, _, content_x, cols) =
+            form_panel_metrics(area, demand, &values);
 
         // Click the Command value row at the 'i' column.
         let cmd_geom_row = form_field_geometries(dialog_y, &values, cols)[2].value_y;
