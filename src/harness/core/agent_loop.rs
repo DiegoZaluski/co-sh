@@ -1991,7 +1991,7 @@ impl Harness {
                     // (`COWORKER_RESUME_BUDGET`), and refuses when the USER
                     // stopped the turn — the one legitimate early end.
                     if let Some(steering) =
-                        self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::EmptyStop)
+                        self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::EmptyStop, None)
                     {
                         current_input = steering;
                         continue;
@@ -2135,36 +2135,24 @@ impl Harness {
                     // material about to arrive anyway (the wait below).
                     && !super::agent_coworkers::has_outstanding_requests(self.coworkers_requester)
                 {
-                    let open: Vec<String> = self
+                    let listed = self
                         .context_manager
                         .todo_list()
-                        .map(|list| {
-                            list.items
-                                .iter()
-                                .filter(|item| {
-                                    matches!(
-                                        item.status,
-                                        cosh_tools::plan::types::TodoStatus::Pending
-                                            | cosh_tools::plan::types::TodoStatus::InProgress
-                                    )
-                                })
-                                .map(|item| format!("- [{}] {}", item.status, item.description))
-                                .collect()
-                        })
+                        .map(super::guards::todo_rerun_open_items)
                         .unwrap_or_default();
-                    if !open.is_empty() {
-                        let listed = open.join("\n");
+                    if !listed.is_empty() {
+                        let open_count = listed.lines().count();
                         log::info!(
                             target: "laya",
                             "natural-stop gate: pending todo items on a report-owing turn — \
                              resuming instead of ending ({} open, {} resumes left)",
-                            open.len(),
+                            open_count,
                             self.coworker_resumes_left - 1
                         );
                         if let Some(steering) =
-                            self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::PendingTodos)
+                            self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::PendingTodos, Some(listed))
                         {
-                            current_input = format!("{steering}\n\nOpen items:\n{listed}");
+                            current_input = steering;
                             continue;
                         }
                     }

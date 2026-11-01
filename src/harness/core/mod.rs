@@ -8,6 +8,10 @@ pub(crate) use loop_state::result_is_useless;
 // Production code refers to it as `super::guards::ResumeCause` directly.
 #[cfg(test)]
 pub(crate) use guards::ResumeCause;
+// Public re-exports: the TUI's idle wake sends the SAME pending-todos message
+// the harness's natural-stop gate resumes a report-owing turn with — one
+// source, two surfaces (see `guards::todo_rerun_message`).
+pub use guards::{todo_rerun_message, todo_rerun_open_items};
 #[allow(unused_imports)]
 use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};

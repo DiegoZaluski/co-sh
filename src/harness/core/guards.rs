@@ -1,6 +1,7 @@
 //! Terminal-error surfacing and the review-gate stop decision.
 
 use super::Harness;
+use cosh_tools::plan::types::{TodoList, TodoStatus};
 
 /// WHY a report-owing turn is being resumed — the `&str` this used to be
 /// invited a typo to silently select the wrong steering text, and the value
@@ -28,6 +29,39 @@ impl ResumeCause {
             Self::PendingTodos => "pending-todos",
         }
     }
+}
+
+/// The open (pending/in-progress) items of `list`, rendered as the
+/// `- [status] description` lines both consumers list under the message.
+pub fn todo_rerun_open_items(list: &TodoList) -> String {
+    list.items
+        .iter()
+        .filter(|item| matches!(item.status, TodoStatus::Pending | TodoStatus::InProgress))
+        .map(|item| format!("- [{}] {}", item.status, item.description))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The exact pending-todos re-run message: the steering text the natural-stop
+/// gate resumes a report-owing turn with, plus the listed open items. Shared
+/// with the TUI's idle wake (`App::wake_main_agent_if_pending_todos`) so both
+/// surfaces send the SAME words — the list is the record the gate trusts, and
+/// two phrasings of the same instruction would drift apart.
+pub fn todo_rerun_message(listed_open_items: Option<&str>) -> String {
+    let mut message = String::from(
+        "[harness:loop-guard:pending-todos] [Harness note: your turn was about \
+         to end, but the todo list you maintain still shows open items. The \
+         harness is giving you one more turn rather than ending it here. FIRST: \
+         reconcile the list — if an item is actually done or no longer applies, \
+         mark it done/cancelled (plan_todo_write); the list is the record this \
+         gate trusts, and an accurate list is what lets the turn end cleanly. \
+         THEN: if real work remains, take the next concrete step on the first \
+         open item; if nothing remains, end with your final report.]",
+    );
+    if let Some(listed) = listed_open_items {
+        message.push_str(&format!("\n\nOpen items:\n{listed}"));
+    }
+    message
 }
 
 impl Harness {
@@ -107,6 +141,7 @@ impl Harness {
         &mut self,
         stop_signal: &std::sync::atomic::AtomicBool,
         cause: ResumeCause,
+        listed_open_items: Option<String>,
     ) -> Option<String> {
         use std::sync::atomic::Ordering;
         let reason = cause.as_str();
@@ -130,13 +165,14 @@ impl Harness {
         // nothing, while a repetition resume follows one that produced text
         // and then repeated itself verbatim. Naming the wrong cause invites
         // the model to "continue" work it never stopped doing.
-        let mut steering = String::from(match cause {
+        let mut steering = match cause {
             ResumeCause::Repetition => {
                 "[harness:loop-guard:repetition] [Harness note: your last few attempts \
                  repeated the same text verbatim instead of advancing, so the harness is \
                  giving you one more turn rather than ending this one. Your context is \
                  intact. Do NOT restate the same message: take the next concrete step and \
                  end with your final report.]"
+                    .to_string()
             }
             ResumeCause::EmptyStop => {
                 "[harness:loop-guard:empty-stop] [Harness note: your previous attempt \
@@ -144,18 +180,12 @@ impl Harness {
                  exists to produce. Your context is intact — nothing was lost. Continue \
                  from exactly where you were cut and finish the task, ending with your \
                  final report.]"
+                    .to_string()
             }
             ResumeCause::PendingTodos => {
-                "[harness:loop-guard:pending-todos] [Harness note: your turn was about \
-                 to end, but the todo list you maintain still shows open items. The \
-                 harness is giving you one more turn rather than ending it here. FIRST: \
-                 reconcile the list — if an item is actually done or no longer applies, \
-                 mark it done/cancelled (plan_todo_write); the list is the record this \
-                 gate trusts, and an accurate list is what lets the turn end cleanly. \
-                 THEN: if real work remains, take the next concrete step on the first \
-                 open item; if nothing remains, end with your final report.]"
+                todo_rerun_message(listed_open_items.as_deref())
             }
-        });
+        };
         let reasoning = std::mem::take(&mut self.attempt_reasoning);
         if !reasoning.trim().is_empty() {
             #[cfg(test)]

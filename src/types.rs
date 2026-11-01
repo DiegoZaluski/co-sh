@@ -28,6 +28,15 @@ pub enum AgentPaneRef {
     },
 }
 
+/// How many pending-todos auto-wakes the main agent may receive before the
+/// user's input must intervene. The changed-listing dedup alone cannot bound
+/// an agent that rewrites its open items every turn (a status toggle or a
+/// reworded description reads as "changed"), so the budget caps the synthetic
+/// turns exactly the way `COWORKER_RESUME_BUDGET` caps the pane resumes. Any
+/// non-wake loop start (a user prompt, a queued message, a wake promise)
+/// resets the counter — fresh steering outranks the stale list.
+pub const TODO_WAKE_BUDGET: u32 = 2;
+
 impl AgentPaneRef {
     /// The agent CLI this pane runs.
     #[must_use]

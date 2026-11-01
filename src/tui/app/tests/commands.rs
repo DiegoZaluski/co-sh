@@ -2762,6 +2762,159 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
     );
 }
 
+/// The pending-todos wake: a main-agent turn that ended while its OWN todo
+/// list still shows open work is re-woken with the EXACT message the
+/// harness's natural-stop gate resumes a report-owing turn with — and ONLY
+/// when no agent is running anywhere and the open listing changed since the
+/// previous wake (an unreconciled list must not re-wake forever).
+#[tokio::test]
+async fn a_pending_todo_wakes_the_idle_main_agent_with_the_rerun_message() {
+    use cosh::harness::core::{todo_rerun_message, todo_rerun_open_items};
+    use cosh_tools::plan::types::{TodoItem, TodoList, TodoStatus};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.gateway_declined = true;
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "todo wake".into(), 0);
+    app.state.current_session_id = Some(session_id);
+
+    let todo = TodoList {
+        items: vec![
+            TodoItem {
+                id: "task-1".into(),
+                description: "finish the analysis".into(),
+                status: TodoStatus::InProgress,
+                depends_on: vec![],
+            },
+            TodoItem {
+                id: "task-2".into(),
+                description: "already done".into(),
+                status: TodoStatus::Completed,
+                depends_on: vec![],
+            },
+        ],
+    };
+
+    // Idle, no agent running, open items present: the wake fires with the
+    // exact shared message + the open listing.
+    app.wake_main_agent_if_pending_todos(Some(&todo));
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "a stale open todo wakes the idle main agent"
+    );
+    let wake_input = app
+        .state
+        .current_session()
+        .unwrap()
+        .messages
+        .last()
+        .unwrap()
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            crate::types::Part::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let expected = todo_rerun_message(Some(&todo_rerun_open_items(&todo)));
+    assert_eq!(
+        wake_input, expected,
+        "the wake message IS the harness's pending-todos steering"
+    );
+
+    // The wake started a loop: a second fire is refused while it runs —
+    // a working main loop reconciles its own list.
+    app.wake_main_agent_if_pending_todos(Some(&todo));
+}
+
+/// The pending-todos wake is silent exactly when it must be: an all-terminal
+/// list, and an unchanged open listing on an idle agent (an unreconciled
+/// list that already fired once must not wake forever).
+#[tokio::test]
+async fn the_todo_wake_stays_silent_without_open_items_or_a_change() {
+    use cosh_tools::plan::types::{TodoItem, TodoList, TodoStatus};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.gateway_declined = true;
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "todo wake quiet".into(), 0);
+    app.state.current_session_id = Some(session_id);
+
+    // All-terminal: nothing open, no wake.
+    let done = TodoList {
+        items: vec![TodoItem {
+            id: "task-1".into(),
+            description: "done work".into(),
+            status: TodoStatus::Completed,
+            depends_on: vec![],
+        }],
+    };
+    app.wake_main_agent_if_pending_todos(Some(&done));
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Idle,
+        "a completed list must not wake the agent"
+    );
+
+    // An open list fires once (via the recorded state), then the SAME open
+    // listing on the still-idle agent is refused: no infinite re-wake.
+    let open = TodoList {
+        items: vec![TodoItem {
+            id: "task-1".into(),
+            description: "stale open work".into(),
+            status: TodoStatus::Pending,
+            depends_on: vec![],
+        }],
+    };
+    app.wake_main_agent_if_pending_todos(Some(&open));
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "the first open listing wakes the idle agent"
+    );
+    // Loop ended again (simulate): back to idle, SAME listing → no second
+    // wake, the listing did not change.
+    app.state.status = crate::types::SessionStatus::Idle;
+    app.wake_main_agent_if_pending_todos(Some(&open));
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Idle,
+        "an unchanged open listing must not re-wake the agent"
+    );
+
+    // A CHANGED listing wakes again.
+    let changed = TodoList {
+        items: vec![
+            TodoItem {
+                id: "task-1".into(),
+                description: "stale open work".into(),
+                status: TodoStatus::Completed,
+                depends_on: vec![],
+            },
+            TodoItem {
+                id: "task-2".into(),
+                description: "new open work".into(),
+                status: TodoStatus::Pending,
+                depends_on: vec![],
+            },
+        ],
+    };
+    app.wake_main_agent_if_pending_todos(Some(&changed));
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "a changed open listing wakes the agent again"
+    );
+}
+
 /// A prompt drag released OVER a pane belongs to the prompt: the split owns
 /// the release only while a pane selection is in flight. The copy must land
 /// and the prompt selection must clear — never die silently under the pane.

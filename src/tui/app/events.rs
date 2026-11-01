@@ -1705,6 +1705,10 @@ impl App {
                     context,
                     checkup_verdict,
                 } => {
+                    // Capture the plan BEFORE `context` is consumed by the
+                    // save below: the pending-todos wake (fired after the
+                    // persist) reads this snapshot.
+                    let todo_snapshot = context.todo.clone();
                     // The main-agent mirror seals its turn BEFORE the status
                     // flips: success closes the marker as Completed.
                     self.mirror_main_done(false);
@@ -1845,6 +1849,14 @@ impl App {
                         // Send a desktop notification if the terminal
                         // window is not focused (user switched away).
                         notification::notify_done(self.terminal_focused);
+                        // The pending-todos wake: a turn that ended while the
+                        // agent's OWN todo list still shows open work is
+                        // re-woken with the SAME message the harness's
+                        // natural-stop gate resumes a report-owing turn with.
+                        // Runs only when nothing else starts (a queued
+                        // next-loop message outranks the stale list) and no
+                        // agent is running anywhere.
+                        self.wake_main_agent_if_pending_todos(todo_snapshot.as_ref());
                     }
                 }
 

@@ -381,6 +381,23 @@ pub struct App {
     /// must go straight to it, not into a queue. The harness's wait wakes on
     /// a pending queued message, so "send now" is honoured within one poll.
     pub(crate) awaiting_pane_reports: bool,
+    /// The open-items listing the LAST pending-todos auto-wake was fired with.
+    /// The wake fires again only when the open list has CHANGED since — a
+    /// turn that stopped without reconciling anything must not be re-woken
+    /// forever (the same bounded-recovery contract every loop-guard shares).
+    todo_wake_last_items: Option<String>,
+    /// Remaining pending-todos auto-wakes for the current interaction. The
+    /// changed-listing dedup alone cannot bound an agent that rewrites its
+    /// open items every turn (a status toggle or a reworded description
+    /// reads as "changed"): the budget caps the synthetic turns, and any
+    /// non-wake loop start (a user prompt, a queued message, a wake
+    /// promise) resets it — fresh steering outranks the stale list.
+    todo_wakes_left: u32,
+    /// Set by the pending-todos wake immediately before its
+    /// `start_agent_loop` call, so the reset inside `start_agent_loop` can
+    /// tell the wake's own start (keep the state) from any other start
+    /// (reset it) without string-sniffing the input.
+    todo_wake_in_flight: bool,
     /// Session id that owns the currently running agent loop — guards the
     /// queue auto-start against mid-run session switches. `pub(crate)`: read
     /// by `routes::session::delete` to decide whether a deleted session
@@ -951,6 +968,9 @@ impl App {
             perm_tx,
             queued_input: cosh::harness::queued_input::QueuedInput::default(),
             awaiting_pane_reports: false,
+            todo_wake_last_items: None,
+            todo_wakes_left: crate::types::TODO_WAKE_BUDGET,
+            todo_wake_in_flight: false,
             active_loop_session_id: None,
             hovered_queue_row: None,
             queue_actions_grace_until: None,

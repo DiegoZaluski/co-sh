@@ -146,7 +146,7 @@ async fn the_user_stop_is_never_resumed() {
     let mut h = pane();
     let stopped = AtomicBool::new(true);
     assert!(
-        h.resume_pane_turn(&stopped, ResumeCause::EmptyStop).is_none(),
+        h.resume_pane_turn(&stopped, ResumeCause::EmptyStop, None).is_none(),
         "a user stop must stand: resuming would override a deliberate interrupt"
     );
     assert_eq!(
@@ -160,7 +160,7 @@ async fn the_user_stop_is_never_resumed() {
     // and re-deriving it wastes a whole attempt of a turn already behind.
     h.set_attempt_reasoning_for_test("step 1: read the file; step 2: report back");
     let steering = h
-        .resume_pane_turn(&AtomicBool::new(false), ResumeCause::EmptyStop)
+        .resume_pane_turn(&AtomicBool::new(false), ResumeCause::EmptyStop, None)
         .expect("a pane that owes a report must resume");
     assert!(
         steering.contains("step 1: read the file; step 2: report back"),
@@ -178,7 +178,7 @@ async fn a_loop_that_owes_no_report_never_resumes() {
     let mut h = Harness::new_test();
     assert!(!h.owes_report(), "the main chat loop owes no report");
     assert!(
-        h.resume_pane_turn(&AtomicBool::new(false), ResumeCause::EmptyStop)
+        h.resume_pane_turn(&AtomicBool::new(false), ResumeCause::EmptyStop, None)
             .is_none(),
         "the main loop must keep its final stop"
     );

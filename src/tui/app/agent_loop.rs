@@ -197,6 +197,17 @@ impl App {
     /// stay queued: [`App::pump_queued_messages`] hands them to the loop's
     /// queued-input channel one at a time (honoring the queue-actions hold).
     pub(super) fn start_agent_loop(&mut self, msg: String) {
+        // The pending-todos wake budget: the wake flags its OWN start so the
+        // state survives it; ANY other start (a user prompt, a queued
+        // message, a wake promise) is fresh steering — it resets the budget
+        // and the listing dedup, so the stale list may wake again after it.
+        if self.todo_wake_in_flight {
+            self.todo_wake_in_flight = false;
+        } else {
+            self.todo_wakes_left = crate::types::TODO_WAKE_BUDGET;
+            self.todo_wake_last_items = None;
+        }
+
         // A real agent turn: the Done handler may do LLM work again (title
         // generation) — the per-turn Command-mode suppression ends here.
         self.command_mode_turn = false;

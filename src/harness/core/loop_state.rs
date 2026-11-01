@@ -240,7 +240,7 @@ impl Harness {
             // always did. The streak is reset so the resumed turn is judged on
             // its own output instead of tripping on the pre-resume history.
             if let Some(steering) =
-                self.resume_pane_turn(stop_signal, super::guards::ResumeCause::Repetition)
+                self.resume_pane_turn(stop_signal, super::guards::ResumeCause::Repetition, None)
             {
                 // The streak is deliberately NOT reset: the resume grants
                 // another turn, but the model's output is still the suspect.

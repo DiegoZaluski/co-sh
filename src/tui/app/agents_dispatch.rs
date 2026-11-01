@@ -1869,6 +1869,87 @@ impl App {
         self.start_agent_loop(report);
     }
 
+    /// The pending-todos wake (the manager/coordination counterpart the
+    /// improper-stop fix deliberately left out): a MAIN-agent turn that
+    /// ended while its OWN todo list still shows open work is re-woken with
+    /// the EXACT message the harness's natural-stop gate resumes a
+    /// report-owing turn with (`guards::todo_rerun_message`) — the list is
+    /// the record that gate trusts, so the wake must speak the same words.
+    ///
+    /// The trigger is the one the improper-stop fix could not cover: the
+    /// agent coordinating `/agents` panes parks its turn to be woken, and a
+    /// stale todo that survived a completed turn is nobody's improper stop —
+    /// it is just unfinished bookkeeping. Waking here avoids keeping the
+    /// main agent running the whole time it is only coordinating.
+    ///
+    /// Conditions, each exact:
+    /// - the main agent is IDLE (no loop running — a working loop drains its
+    ///   own todo state in-turn, the wake must never interleave);
+    /// - NO agent is running anywhere (no main loop, no pane turn): the wake
+    ///   must not race a pane whose report is about to land;
+    /// - the todo list has open (pending/in-progress) items;
+    /// - the open listing CHANGED since the previous wake: an agent that
+    ///   stopped without reconciling anything must not be re-woken forever;
+    /// - the wake budget still has a unit (a listing that changes every
+    ///   turn — a status toggle, a reworded item — would otherwise read as
+    ///   "changed" forever); any non-wake loop start resets it;
+    /// - Command mode is OFF: there the input is dispatched to `bash_run`
+    ///   verbatim, and the steering text (with its free-text item
+    ///   descriptions) must never become shell commands;
+    /// - the Queue Actions hold is OFF: no auto-start while the user is
+    ///   operating on queued messages (the same contract
+    ///   `handle_loop_end` defers its own auto-start under).
+    pub(super) fn wake_main_agent_if_pending_todos(&mut self, todo: Option<&cosh_tools::plan::types::TodoList>) {
+        if self.any_agent_running() {
+            return;
+        }
+        if self.state.mode == cosh::harness::Mode::Command {
+            return;
+        }
+        if self.queue_actions_hold_active() {
+            return;
+        }
+        let Some(todo) = todo else {
+            return;
+        };
+        let listed = cosh::harness::core::todo_rerun_open_items(todo);
+        if listed.is_empty() {
+            return;
+        }
+        if self.todo_wake_last_items.as_deref() == Some(listed.as_str()) {
+            return;
+        }
+        if self.todo_wakes_left == 0 {
+            log::info!(
+                target: "laya",
+                "pending-todos wake refused: the budget is spent (listing changed again, {} open items)",
+                listed.lines().count()
+            );
+            return;
+        }
+        self.todo_wake_last_items = Some(listed.clone());
+        self.todo_wakes_left -= 1;
+        self.todo_wake_in_flight = true;
+        log::info!(
+            target: "laya",
+            "pending-todos wake: starting a turn with the re-run steering ({} open items, {} wakes left)",
+            listed.lines().count(),
+            self.todo_wakes_left
+        );
+        self.start_agent_loop(cosh::harness::core::todo_rerun_message(Some(&listed)));
+    }
+
+    /// Whether ANY agent turn is running: the main loop (`Working`) or any
+    /// `/agents` pane turn (live or parked split). The pending-todos wake
+    /// must not fire while an agent is active — the report of a running
+    /// pane is the fresher material, and a working main loop reconciles its
+    /// own list.
+    fn any_agent_running(&self) -> bool {
+        self.state.status == crate::types::SessionStatus::Working
+            || either_split(&self.agents_split, &self.parked_agents_split)
+                .is_some_and(|split| split.panes.iter().any(|p| p.running))
+    }
+
     /// Absorb the session-binding FACTS the pane turns recorded gate-free
     /// (see `cosh::harness::agent_coworkers::record_session_binding`): promote the
     /// matching pane object — LIVE, PARKED or HIDDEN — to the session the
