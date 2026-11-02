@@ -717,7 +717,10 @@ async fn slash_models_on_a_focused_cosh_pane_opens_the_pane_picker() {
     app.handle_model_dialog_key(KeyCode::Esc);
     assert_eq!(app.pane_model_edit, None);
     assert!(!app.is_model_dialog_visible());
-    assert_eq!(app.llm_config.model, crate::config::LlmConfig::from_env().model);
+    assert_eq!(
+        app.llm_config.model,
+        crate::config::LlmConfig::from_env().model
+    );
 }
 
 // ── The prompt badge must reflect the pane's OWN model ──────────────────

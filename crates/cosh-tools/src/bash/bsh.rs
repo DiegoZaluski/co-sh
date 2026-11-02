@@ -35,9 +35,9 @@ use tokio_stream::StreamExt;
 use super::liveness::LivenessConfig;
 use super::liveness::LivenessState;
 use super::liveness::ORPHAN_ESCAPE_MESSAGE;
-use super::liveness::sample_tree;
 #[cfg(windows)]
 use super::liveness::kill_process_tree;
+use super::liveness::sample_tree;
 #[cfg(any(unix, windows))]
 use tokio::sync::mpsc;
 

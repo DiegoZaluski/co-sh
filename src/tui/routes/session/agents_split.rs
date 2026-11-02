@@ -490,8 +490,7 @@ pub struct AgentsSplitState {
     /// each split render so finished calls never keep animating state alive.
     /// Lives on the split state (not the pane) so the pane model stays
     /// plain data.
-    pub tool_spinners:
-        HashMap<String, crate::component::spinner_highlight::HighlightSpinner>,
+    pub tool_spinners: HashMap<String, crate::component::spinner_highlight::HighlightSpinner>,
     /// Copy-by-selection state (the chat's drag contract, one selection for
     /// the whole split): the pane it started in, the screen-space anchor/
     /// focus, and the content rows they map to.
@@ -4515,7 +4514,11 @@ mod tests {
                 render(&mut buf, area, &mut state, &theme, 1.0 / 30.0);
                 for x in 0..40u16 {
                     if let Some(cell) = buf.cell((x, 1)) {
-                        if cell.symbol().chars().next().is_some_and(|c| !c.is_whitespace())
+                        if cell
+                            .symbol()
+                            .chars()
+                            .next()
+                            .is_some_and(|c| !c.is_whitespace())
                             && cell.style().fg != Some(base)
                         {
                             distinct = true;

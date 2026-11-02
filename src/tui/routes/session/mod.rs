@@ -3,8 +3,8 @@ pub mod free_gateway_recommendation;
 pub mod streaming;
 pub mod tool_render;
 
-pub mod agents_split;
 pub mod agent_command_map;
+pub mod agents_split;
 
 pub mod delete;
 pub mod permission;
@@ -38,8 +38,8 @@ use msg_tokens::{
     part_content_stamp, status_to_u8,
 };
 use part_lines::{
-    SUMMARIZING_COLLAPSED_LINES, SUMMARIZING_PAD_V, compaction_color, compaction_line, install_line,
-    summarizing_height, summarizing_id,
+    SUMMARIZING_COLLAPSED_LINES, SUMMARIZING_PAD_V, compaction_color, compaction_line,
+    install_line, summarizing_height, summarizing_id,
 };
 use text::{blit_cell_rows, conceal_text, draw_hint_button, hash_parts, sanitize_text};
 
@@ -62,16 +62,16 @@ use cosh_tui::core::renderables::markdown::estimate_height;
 use std::hash::Hasher;
 
 use self::tool_render::ToolRenderState;
+use crate::agent_colors::AgentColors;
+use crate::component::scroll_pill::ScrollPill;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
-use crate::component::scroll_pill::ScrollPill;
-use crate::agent_colors::AgentColors;
-use crate::types::{CompactionPart, FilePart, InstallPart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolPart, ToolStatus, };
+use crate::types::{
+    CompactionPart, FilePart, InstallPart, Message, MessageRole, Part, ReasoningPart,
+    SessionStatus, ToolPart, ToolStatus,
+};
 use std::time::Instant;
-
-
-
 
 use crate::util::draw::draw_text_line;
 use crate::util::text_region::{

@@ -696,7 +696,10 @@ mod tests {
             value_contains: Some("Done".into()),
             ..Default::default()
         };
-        assert!(validate(&contains_ok).is_ok(), "`value_contains` is its own mode");
+        assert!(
+            validate(&contains_ok).is_ok(),
+            "`value_contains` is its own mode"
+        );
     }
 
     /// The EVENT mode: app-scoped only — every element field is rejected;
@@ -724,10 +727,26 @@ mod tests {
         );
 
         for extra in [
-            ComputerWait { state: Some(WaitState::Visible), event: Some(WaitEvent::FocusChanged), ..Default::default() },
-            ComputerWait { value: Some("x".into()), event: Some(WaitEvent::FocusChanged), ..Default::default() },
-            ComputerWait { value_contains: Some("x".into()), event: Some(WaitEvent::FocusChanged), ..Default::default() },
-            ComputerWait { nth: Some(1), event: Some(WaitEvent::FocusChanged), ..Default::default() },
+            ComputerWait {
+                state: Some(WaitState::Visible),
+                event: Some(WaitEvent::FocusChanged),
+                ..Default::default()
+            },
+            ComputerWait {
+                value: Some("x".into()),
+                event: Some(WaitEvent::FocusChanged),
+                ..Default::default()
+            },
+            ComputerWait {
+                value_contains: Some("x".into()),
+                event: Some(WaitEvent::FocusChanged),
+                ..Default::default()
+            },
+            ComputerWait {
+                nth: Some(1),
+                event: Some(WaitEvent::FocusChanged),
+                ..Default::default()
+            },
         ] {
             let err = validate(&extra).unwrap_err();
             assert!(
@@ -779,7 +798,10 @@ mod tests {
             flag: xa11y::StateFlag::Checked,
             value: false,
         };
-        assert!(event_matches(&event_kind(WaitEvent::StateChanged), &delivered));
+        assert!(event_matches(
+            &event_kind(WaitEvent::StateChanged),
+            &delivered
+        ));
         // Other kinds match exactly and nothing else.
         assert!(!event_matches(
             &event_kind(WaitEvent::WindowOpened),
@@ -797,7 +819,7 @@ mod tests {
     /// (untagged): no `Event`/`State` wrapper key may leak onto the wire.
     #[test]
     fn event_wire_kind_roundtrips_and_serializes_flat() {
-        use crate::computer::types::{WaitedEvent, WaitedEventTarget, WaitResult};
+        use crate::computer::types::{WaitResult, WaitedEvent, WaitedEventTarget};
         use crate::computer::wait::event_kind_wire;
 
         // The echo vocabulary is the SERDE token of `WaitEvent`
@@ -971,12 +993,10 @@ mod tests {
 /// repair alongside them, against the hand-written description schema.
 #[cfg(test)]
 mod wait_extraction_tests {
-    use cosh_sdk::extract_action::{
-        ExtractAction, NativeToolCall, StreamAction, ToolSchema,
-    };
+    use cosh_sdk::extract_action::{ExtractAction, NativeToolCall, StreamAction, ToolSchema};
 
-    use crate::computer::types::{ComputerWait, WaitEvent};
     use crate::computer::Computer;
+    use crate::computer::types::{ComputerWait, WaitEvent};
 
     fn schema(description: &serde_json::Value) -> ToolSchema {
         ToolSchema {

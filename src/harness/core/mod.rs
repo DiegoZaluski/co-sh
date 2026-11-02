@@ -1,6 +1,6 @@
-use super::{checkup, events};
-use super::{background, guardrails, hooks, agent_coworkers, queued_input};
 use super::context;
+use super::{agent_coworkers, background, guardrails, hooks, queued_input};
+use super::{checkup, events};
 #[allow(unused_imports)]
 pub(crate) use loop_state::result_is_useless;
 // Test-only re-export: the `harness::test` modules are siblings of `core`,
@@ -11,7 +11,6 @@ pub(crate) use guards::ResumeCause;
 // Public re-exports: the TUI's idle wake sends the SAME pending-todos message
 // the harness's natural-stop gate resumes a report-owing turn with — one
 // source, two surfaces (see `guards::todo_rerun_message`).
-pub use guards::{todo_rerun_message, todo_rerun_open_items};
 #[allow(unused_imports)]
 use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
@@ -21,74 +20,75 @@ use super::tools::CoshTools;
 use crate::mcp::{McpConfig, McpManager};
 #[cfg(test)]
 use cosh_sdk::connector::ChatMessage;
-use cosh_sdk::connector::{
-    ClaudeThinkingBlock, Connector, ToolCallMode,
-};
-#[cfg(test)]
-use cosh_sdk::extract_action::ToolSchema;
+use cosh_sdk::connector::{ClaudeThinkingBlock, Connector, ToolCallMode};
 #[cfg(test)]
 use cosh_sdk::extract_action::NativeToolCall;
 use cosh_sdk::extract_action::ToolCallData;
+#[cfg(test)]
+use cosh_sdk::extract_action::ToolSchema;
 use cosh_tools::TOOL_FORMAT;
-pub use types::{ManualCompactionOutcome, Mode, StreamEvent};
 use cosh_tools::lsp::Lsp;
+pub use guards::{todo_rerun_message, todo_rerun_open_items};
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
-#[cfg(test)]
-use tokio::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use tokio::time::Duration;
+pub use types::{ManualCompactionOutcome, Mode, StreamEvent};
 
 mod types;
 
+mod agent_loop;
+mod build;
 #[cfg(test)]
 #[path = "../test/checkpoint_output.rs"]
 mod checkpoint_output;
+mod compaction;
+mod dispatch;
+mod extraction;
+mod guards;
+mod limits;
+mod loop_state;
+mod map_reduce;
 #[cfg(test)]
 #[path = "../test/map_reduce_test.rs"]
 mod map_reduce_test;
+#[cfg(test)]
+mod mock_support;
+mod prefix_cache;
+mod prompt_context;
+mod prompts;
+mod snapshots;
+mod stream;
+mod subagent;
 #[path = "../summarization.rs"]
 mod summarization;
 #[cfg(test)]
 #[path = "../test/summary_failure_loop.rs"]
 mod summary_failure_loop;
-mod prompts;
-mod limits;
-mod prefix_cache;
 mod tool_catalog;
-mod guards;
-mod loop_state;
-mod snapshots;
-mod extraction;
-mod stream;
-mod map_reduce;
-mod compaction;
-mod prompt_context;
 mod tool_routing;
-mod build;
-mod dispatch;
-mod subagent;
-mod agent_loop;
-#[cfg(test)]
-mod mock_support;
 
+#[allow(unused_imports)]
+use compaction::MAX_COMPACTION_RETRIES;
+#[allow(unused_imports)]
+pub(crate) use compaction::annotate_summary_tool_set;
+#[cfg(not(test))]
+use compaction::discovered_context_window;
 use compaction::{
     CompactionErr, MAP_CONCURRENCY, MIN_SUMMARY_OUTPUT_HEADROOM, compaction_retry_backoff,
     looks_like_argument_error, wait_for_stop_signal,
 };
-#[allow(unused_imports)]
-use compaction::MAX_COMPACTION_RETRIES;
-#[cfg(not(test))]
-use compaction::discovered_context_window;
-#[allow(unused_imports)]
-pub(crate) use compaction::annotate_summary_tool_set;
-
 
 use prefix_cache::PrefixCacheProbe;
 pub use tool_catalog::HarnessTool;
-use tool_catalog::{build_lsp, default_harness_tools, PromptSystem};
+use tool_catalog::{PromptSystem, build_lsp, default_harness_tools};
 
-pub(crate) use limits::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, ITERATION_RENEWALS, SUBAGENT_BLOCKED_TOOLS};
+pub(crate) use limits::{
+    CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, ITERATION_RENEWALS, MAX_ITERATIONS,
+    SUBAGENT_BLOCKED_TOOLS,
+};
 // Test-only: the veto-budget pin counts against this bound (the lib itself
 // reads it from `limits::` directly), so the re-export must not exist in a
 // production build — there it is an unused import.
@@ -99,7 +99,6 @@ pub use prompts::{
     INSTRUCTIONS_ASK, INSTRUCTIONS_BUILD, INSTRUCTIONS_BUILD_BASE, INSTRUCTIONS_BUILD_SELF_REVIEW,
     INSTRUCTIONS_SUBAGENT, INSTRUCTIONS_YOLO, INSTRUCTIONS_YOLO_BASE, INSTRUCTIONS_YOLO_CWD,
 };
-
 
 #[allow(clippy::struct_field_names)]
 pub struct Harness {
@@ -393,7 +392,6 @@ pub struct Harness {
     #[cfg(test)]
     pub(crate) test_tools: Vec<ToolSchema>,
 }
-
 
 impl Harness {
     /// Builds the system header for the LLM.

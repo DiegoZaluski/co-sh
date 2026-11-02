@@ -101,8 +101,7 @@ impl ModelPicks {
     /// session keeps serving it) and a later `set` may still land. The caller
     /// surfaces the failure or ignores it; nothing here blocks a turn.
     pub fn set(&mut self, agent: &str, model: &str) -> Result<(), String> {
-        self.picks
-            .insert(agent.to_string(), model.to_string());
+        self.picks.insert(agent.to_string(), model.to_string());
         save_to_disk(&self.path, &self.picks)
     }
 
@@ -137,12 +136,7 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let file = format!(
-        "{}.{}.{}.tmp",
-        MODEL_PICKS_FILE,
-        std::process::id(),
-        seq
-    );
+    let file = format!("{}.{}.{}.tmp", MODEL_PICKS_FILE, std::process::id(), seq);
     path.with_file_name(file)
 }
 
@@ -270,8 +264,7 @@ mod tests {
         // rename publishes that writer's COMPLETE in-memory map, so the file
         // on disk is always whole, parseable JSON — never a torn merge.
         let text = std::fs::read_to_string(&file).expect("the file exists");
-        serde_json::from_str::<serde_json::Value>(&text)
-            .expect("the file is always complete JSON");
+        serde_json::from_str::<serde_json::Value>(&text).expect("the file is always complete JSON");
         let reopened = ModelPicks::with_file(file);
         // Whichever write survived, its entry is intact and the other writer
         // never corrupted the shape.

@@ -511,7 +511,9 @@ pub(crate) fn mirror_config_option(option: &schema::SessionConfigOption) -> Agen
             };
             (values, select.current_value.0.to_string(), None)
         }
-        schema::SessionConfigKind::Boolean(flag) => (Vec::new(), String::new(), Some(flag.current_value)),
+        schema::SessionConfigKind::Boolean(flag) => {
+            (Vec::new(), String::new(), Some(flag.current_value))
+        }
         _ => (Vec::new(), String::new(), None),
     };
     AgentConfigOption {
@@ -601,26 +603,28 @@ impl SubagentEvent {
             schema::SessionUpdate::SessionInfoUpdate(update) => {
                 session_info_title(&update).map(|title| Self::SessionInfo { title: Some(title) })
             }
-            schema::SessionUpdate::AvailableCommandsUpdate(update) => {
-                Some(Self::Commands {
-                    commands: update
-                        .available_commands
-                        .into_iter()
-                        .map(|cmd| AgentCommand {
-                            name: cmd.name,
-                            description: cmd.description,
-                            input_hint: match cmd.input {
-                                Some(schema::AvailableCommandInput::Unstructured(input)) => {
-                                    Some(input.hint)
-                                }
-                                _ => None,
-                            },
-                        })
-                        .collect(),
-                })
-            }
+            schema::SessionUpdate::AvailableCommandsUpdate(update) => Some(Self::Commands {
+                commands: update
+                    .available_commands
+                    .into_iter()
+                    .map(|cmd| AgentCommand {
+                        name: cmd.name,
+                        description: cmd.description,
+                        input_hint: match cmd.input {
+                            Some(schema::AvailableCommandInput::Unstructured(input)) => {
+                                Some(input.hint)
+                            }
+                            _ => None,
+                        },
+                    })
+                    .collect(),
+            }),
             schema::SessionUpdate::ConfigOptionUpdate(update) => Some(Self::ConfigOptions {
-                options: update.config_options.iter().map(mirror_config_option).collect(),
+                options: update
+                    .config_options
+                    .iter()
+                    .map(mirror_config_option)
+                    .collect(),
             }),
             // No display representation (yet).
             _ => None,

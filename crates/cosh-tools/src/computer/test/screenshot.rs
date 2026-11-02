@@ -130,7 +130,10 @@ mod screenshot_annotate_tests {
         let text = msg.content.as_deref().unwrap_or_default();
         assert!(!text.contains("Annotated elements"));
         assert!(text.contains("screenshot 800x600"));
-        assert!(!text.contains("saved to"), "no save echo without save_path: {text}");
+        assert!(
+            !text.contains("saved to"),
+            "no save echo without save_path: {text}"
+        );
     }
 
     #[test]
@@ -167,10 +170,8 @@ mod screenshot_annotate_tests {
     fn save_png_creates_parents_overwrites_and_echoes_raw() {
         use crate::computer::screenshot::save_png;
 
-        let dir = std::env::temp_dir().join(format!(
-            "cosh-tools-savepng-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cosh-tools-savepng-test-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let target = dir.join("even-deeper").join("shot.png");
         let padded = format!("  {}  ", target.to_string_lossy());
@@ -180,7 +181,10 @@ mod screenshot_annotate_tests {
             echoed, padded,
             "the echoed path is the caller's issue, untrimmed"
         );
-        assert!(target.is_file(), "trim is applied to the filesystem target only");
+        assert!(
+            target.is_file(),
+            "trim is applied to the filesystem target only"
+        );
 
         save_png(&target.to_string_lossy(), b"two-bytes-longer")
             .expect("overwrite of an existing file must succeed");

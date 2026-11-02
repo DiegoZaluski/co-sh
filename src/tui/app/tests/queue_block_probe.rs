@@ -26,7 +26,6 @@ fn mouse_click(x: u16, y: u16) -> crossterm::event::MouseEvent {
     }
 }
 
-
 #[tokio::test]
 async fn probe_app_queue_after_block_hover_and_click() {
     let _guard = HOME_LOCK.lock();
@@ -42,7 +41,10 @@ async fn probe_app_queue_after_block_hover_and_click() {
         s.messages.push(Message {
             id: "msg-0".into(),
             role: MessageRole::User,
-            parts: vec![Part::Text(TextPart { text: "first question".into(), synthetic: false })],
+            parts: vec![Part::Text(TextPart {
+                text: "first question".into(),
+                synthetic: false,
+            })],
             created_at: 0,
             agent: None,
             model: None,
@@ -54,7 +56,12 @@ async fn probe_app_queue_after_block_hover_and_click() {
                 Part::Tool(ToolPart {
                     tool: "bash_run".into(),
                     input: serde_json::json!({ "command": "make deploy" }),
-                    output: Some((0..8).map(|i| format!("deploy step {i} ok")).collect::<Vec<_>>().join("\n")),
+                    output: Some(
+                        (0..8)
+                            .map(|i| format!("deploy step {i} ok"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                     status: ToolStatus::Completed,
                     tool_call_id: Some("b1".into()),
                     is_start: true,
@@ -62,7 +69,13 @@ async fn probe_app_queue_after_block_hover_and_click() {
                     cached_line_count: None,
                     lsp_notes: None,
                 }),
-                Part::Text(TextPart { text: (0..24).map(|i| format!("streaming line number {i}")).collect::<Vec<_>>().join("\n"), synthetic: false }),
+                Part::Text(TextPart {
+                    text: (0..24)
+                        .map(|i| format!("streaming line number {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    synthetic: false,
+                }),
             ],
             created_at: 0,
             agent: None,
@@ -83,9 +96,11 @@ async fn probe_app_queue_after_block_hover_and_click() {
     app.enqueue_pending_message(QueueTarget::NextRequest, "queued follow-up".into());
     // The loop consumes it: pump hands it to the harness; the harness acks.
     app.pump_queued_messages();
-    app.event_tx.send(cosh::harness::HarnessEvent::UserMessageInjected {
-        text: "queued follow-up".into(),
-    }).ok();
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::UserMessageInjected {
+            text: "queued follow-up".into(),
+        })
+        .ok();
     app.poll_events();
 
     // Frames after injection (still Working: the turn keeps streaming).
@@ -96,7 +111,9 @@ async fn probe_app_queue_after_block_hover_and_click() {
     // Dump the frame + geometry.
     let buf = terminal.backend().buffer().clone();
     for y in 0..h {
-        let row: String = (0..w).filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string())).collect();
+        let row: String = (0..w)
+            .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+            .collect();
         eprintln!("row {y:>2} | {}", row.trim_end());
     }
     let vp = app.session_viewport_area();
@@ -114,8 +131,10 @@ async fn probe_app_queue_after_block_hover_and_click() {
             .filter(|&yy| (0..w).any(|x| b.cell((x, yy)).map(|c| c.bg == tint).unwrap_or(false)))
             .collect();
         if app.session_view.hovered_msg_idx.is_some() || !tint_rows.is_empty() {
-            eprintln!("hover y={y:>2} -> idx {:?} tint_rows={tint_rows:?}",
-                app.session_view.hovered_msg_idx);
+            eprintln!(
+                "hover y={y:>2} -> idx {:?} tint_rows={tint_rows:?}",
+                app.session_view.hovered_msg_idx
+            );
         }
     }
 
@@ -125,10 +144,15 @@ async fn probe_app_queue_after_block_hover_and_click() {
         app.handle_mouse_event(mouse_click(50, y)).unwrap();
         app.handle_mouse_event(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
-            column: 50, row: y, modifiers: crossterm::event::KeyModifiers::NONE,
-        }).unwrap();
+            column: 50,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+        .unwrap();
         if let Some(dialog) = app.dialog.current() {
-            if let crate::ui::dialogs::DialogType::MessageActions { message_id, .. } = &dialog.dialog_type {
+            if let crate::ui::dialogs::DialogType::MessageActions { message_id, .. } =
+                &dialog.dialog_type
+            {
                 eprintln!("click y={y:>2} -> MessageActions for {message_id}");
             }
             app.dialog.pop();
@@ -161,7 +185,10 @@ async fn probe_app_real_order_hover_sweep() {
         s.messages.push(Message {
             id: "msg-0".into(),
             role: MessageRole::User,
-            parts: vec![Part::Text(TextPart { text: "first question".into(), synthetic: false })],
+            parts: vec![Part::Text(TextPart {
+                text: "first question".into(),
+                synthetic: false,
+            })],
             created_at: 0,
             agent: None,
             model: None,
@@ -173,7 +200,12 @@ async fn probe_app_real_order_hover_sweep() {
                 Part::Tool(ToolPart {
                     tool: "bash_run".into(),
                     input: serde_json::json!({ "command": "make deploy" }),
-                    output: Some((0..8).map(|i| format!("deploy step {i} ok")).collect::<Vec<_>>().join("\n")),
+                    output: Some(
+                        (0..8)
+                            .map(|i| format!("deploy step {i} ok"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                     status: ToolStatus::Completed,
                     tool_call_id: Some("b1".into()),
                     is_start: true,
@@ -182,7 +214,10 @@ async fn probe_app_real_order_hover_sweep() {
                     lsp_notes: None,
                 }),
                 Part::Text(TextPart {
-                    text: (0..24).map(|i| format!("streaming line number {i}")).collect::<Vec<_>>().join("\n"),
+                    text: (0..24)
+                        .map(|i| format!("streaming line number {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     synthetic: false,
                 }),
             ],
@@ -201,18 +236,29 @@ async fn probe_app_real_order_hover_sweep() {
 
     let tint = crate::theme::rgba_color(app.theme.background_element);
     let sweep = |app: &mut App, terminal: &mut Terminal<TestBackend>, label: &str| {
-        let (w, h) = (terminal.backend().buffer().area.width, terminal.backend().buffer().area.height);
-        eprintln!("── sweep {label} ── strip_area={:?} vp={:?}", app.compute_pending_queues_area(), app.session_viewport_area());
+        let (w, h) = (
+            terminal.backend().buffer().area.width,
+            terminal.backend().buffer().area.height,
+        );
+        eprintln!(
+            "── sweep {label} ── strip_area={:?} vp={:?}",
+            app.compute_pending_queues_area(),
+            app.session_viewport_area()
+        );
         for y in 1..h {
             app.handle_mouse_event(mouse_move(50, y)).unwrap();
             terminal.draw(|f| app.render(f, 0.016)).unwrap();
             let b = terminal.backend().buffer();
             let tint_rows: Vec<u16> = (0..h)
-                .filter(|&yy| (0..w).any(|x| b.cell((x, yy)).map(|c| c.bg == tint).unwrap_or(false)))
+                .filter(|&yy| {
+                    (0..w).any(|x| b.cell((x, yy)).map(|c| c.bg == tint).unwrap_or(false))
+                })
                 .collect();
             if app.session_view.hovered_msg_idx.is_some() {
-                eprintln!("hover y={y:>2} -> idx {:?} tint_rows={tint_rows:?}",
-                    app.session_view.hovered_msg_idx);
+                eprintln!(
+                    "hover y={y:>2} -> idx {:?} tint_rows={tint_rows:?}",
+                    app.session_view.hovered_msg_idx
+                );
             }
         }
         app.session_view.clear_hover();
@@ -226,9 +272,11 @@ async fn probe_app_real_order_hover_sweep() {
     // Phase 2: the loop consumes it — pump hands it to the shared queue, the
     // harness acks with UserMessageInjected (deque popped + message mirrored).
     app.pump_queued_messages();
-    app.event_tx.send(cosh::harness::HarnessEvent::UserMessageInjected {
-        text: "queued follow-up".into(),
-    }).ok();
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::UserMessageInjected {
+            text: "queued follow-up".into(),
+        })
+        .ok();
     app.poll_events();
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
     sweep(&mut app, &mut terminal, "injected");
@@ -240,12 +288,20 @@ async fn probe_app_real_order_hover_sweep() {
         let m = s.messages.iter_mut().find(|m| m.id == "msg-1").unwrap();
         if let Some(Part::Text(t)) = m.parts.last_mut() {
             t.text.push('\n');
-            t.text.push_str(&(24..30).map(|i| format!("streaming line number {i}")).collect::<Vec<_>>().join("\n"));
+            t.text.push_str(
+                &(24..30)
+                    .map(|i| format!("streaming line number {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
         }
     }
     // Move BEFORE the next render (stale mapping — the real event order).
     app.handle_mouse_event(mouse_move(50, 20)).unwrap();
-    eprintln!("pre-render hover after growth -> {:?}", app.session_view.hovered_msg_idx);
+    eprintln!(
+        "pre-render hover after growth -> {:?}",
+        app.session_view.hovered_msg_idx
+    );
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
     sweep(&mut app, &mut terminal, "post-growth");
 }

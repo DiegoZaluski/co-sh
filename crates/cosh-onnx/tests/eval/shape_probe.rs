@@ -175,10 +175,12 @@ fn shapes() -> Vec<Shape> {
         // The shipped (failing) two-field shape.
         Shape {
             name: "B. user_request + assistant_response",
-            build: |p| json!({
-                "user_request": p.request,
-                "assistant_response": p.response,
-            }),
+            build: |p| {
+                json!({
+                    "user_request": p.request,
+                    "assistant_response": p.response,
+                })
+            },
             instructions: INSTR_TWO_FIELD,
             criteria: CRITERIA_CURRENT,
         },
@@ -227,10 +229,12 @@ fn shapes() -> Vec<Shape> {
         // crossed with the reframe, for the full picture.
         Shape {
             name: "H. two-field + QA-closure criteria",
-            build: |p| json!({
-                "user_request": p.request,
-                "assistant_response": p.response,
-            }),
+            build: |p| {
+                json!({
+                    "user_request": p.request,
+                    "assistant_response": p.response,
+                })
+            },
             instructions: INSTR_TWO_FIELD,
             criteria: CRITERIA_QA,
         },
@@ -313,7 +317,9 @@ fn shape_probe() {
             let state = (shape.build)(pair);
             let result = model
                 .decide(&state, &qs, None, None, None)
-                .unwrap_or_else(|e| panic!("decide failed [{}/{}]: {e}", shape.name, pair.response));
+                .unwrap_or_else(|e| {
+                    panic!("decide failed [{}/{}]: {e}", shape.name, pair.response)
+                });
             let answers = &result["answers"];
             let said = answers["loop_terminated"]["choice"]
                 .as_str()
@@ -322,7 +328,12 @@ fn shape_probe() {
             let conf = answers["loop_terminated"]["answer_confidence"]
                 .as_f64()
                 .unwrap_or(0.0);
-            let correct = said == if pair.terminated { "terminated" } else { "running" };
+            let correct = said
+                == if pair.terminated {
+                    "terminated"
+                } else {
+                    "running"
+                };
             hits += usize::from(correct);
             total += 1;
             detail.push(format!(

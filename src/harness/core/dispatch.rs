@@ -65,7 +65,9 @@ impl Harness {
                 .get("run_in_background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if run_in_background && (self.nested || self.coworkers_requester != super::agent_coworkers::MAIN) {
+            if run_in_background
+                && (self.nested || self.coworkers_requester != super::agent_coworkers::MAIN)
+            {
                 self.tool_issuer.pop_front();
                 return Err(
                     "run_in_background is not available in this loop: background \
@@ -203,7 +205,12 @@ impl Harness {
             } else {
                 super::agent_coworkers::ReplyMode::Wait
             };
-            let handle = match super::agent_coworkers::enqueue(&coworker, &input, self.coworkers_requester, mode) {
+            let handle = match super::agent_coworkers::enqueue(
+                &coworker,
+                &input,
+                self.coworkers_requester,
+                mode,
+            ) {
                 Ok(handle) => handle,
                 Err(error) => return Err(error),
             };
@@ -395,7 +402,10 @@ impl Harness {
                         .to_string(),
                 );
             }
-            let op_id = match super::agent_coworkers::enqueue_compact_op(&coworker, self.coworkers_requester) {
+            let op_id = match super::agent_coworkers::enqueue_compact_op(
+                &coworker,
+                self.coworkers_requester,
+            ) {
                 Ok(id) => id,
                 Err(error) => return Err(error),
             };

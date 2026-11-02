@@ -4,7 +4,12 @@ impl SessionView {
     /// Locate the message index under content row `click_y` using the
     /// prefix-y binary search. Shared by the click handler and the hover
     /// tracker.
-    pub(super) fn message_index_at_y(&self, vp_top: i32, click_y: i32, len: usize) -> Option<usize> {
+    pub(super) fn message_index_at_y(
+        &self,
+        vp_top: i32,
+        click_y: i32,
+        len: usize,
+    ) -> Option<usize> {
         let mut low = 0;
         let mut high = len;
         while low < high {

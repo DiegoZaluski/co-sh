@@ -23,7 +23,8 @@ fn ctrl(code: KeyCode) -> KeyEvent {
 /// Build a session with `n` user messages (assistant replies interleaved)
 /// and make it the current session.
 fn session_with_user_messages(app: &mut App, id: &str, n: usize, tag: &str) {
-    app.state.add_empty_session(id.to_string(), tag.to_string(), 0);
+    app.state
+        .add_empty_session(id.to_string(), tag.to_string(), 0);
     app.state.current_session_id = Some(id.to_string());
     {
         let s = app.state.current_session_mut().unwrap();
@@ -73,7 +74,8 @@ async fn history_up_after_session_switch_never_panics() {
     // Short session: only 1 user message.
     session_with_user_messages(&mut app, "short", 1, "short");
     // A third stopgap session (no messages) guards the walk at both ends.
-    app.state.add_empty_session("stopgap".into(), "stopgap".into(), 0);
+    app.state
+        .add_empty_session("stopgap".into(), "stopgap".into(), 0);
 
     app.state.current_session_id = Some("long".into());
     app.prompt_view.focus();
@@ -91,7 +93,10 @@ async fn history_up_after_session_switch_never_panics() {
     // history_index).
     app.switch_session_locked("short");
     app.prompt_view.focus();
-    assert_eq!(app.prompt_view.history_index, 7, "index carried across the switch");
+    assert_eq!(
+        app.prompt_view.history_index, 7,
+        "index carried across the switch"
+    );
 
     // The carried index (7) now points past the short session's single
     // user message. Ctrl+Up must clamp or no-op — not panic.
@@ -140,7 +145,8 @@ async fn history_up_on_empty_session_never_panics() {
     browse_to_top(&mut app, 6); // history_index = 3
 
     // Switch to a session with NO user messages at all.
-    app.state.add_empty_session("empty".into(), "empty".into(), 0);
+    app.state
+        .add_empty_session("empty".into(), "empty".into(), 0);
     app.switch_session_locked("empty");
     app.prompt_view.focus();
 

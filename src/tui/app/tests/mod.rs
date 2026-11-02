@@ -54,11 +54,11 @@ fn isolate_home() {
 // (`E0583: file not found for module`), so it was removed. Re-add it together
 // with its file when the probe lands.
 mod agent_loop;
-mod history_panic_probe;
 mod commands;
 mod cost;
 mod dialogs;
 mod gateway_offer;
+mod history_panic_probe;
 mod keys;
 mod model_persistence;
 mod paste_burst;
@@ -70,8 +70,8 @@ mod provider_login;
 mod providers;
 mod queue_block_probe;
 mod rag;
-mod restart_toast;
 mod render;
+mod restart_toast;
 mod router_mouse;
 mod sessions_mouse;
 #[cfg(target_os = "linux")] // subprocess isolation uses XDG data/config roots

@@ -232,9 +232,7 @@ impl SessionView {
                     _start.elapsed().as_micros(),
                     session.messages.len()
                 );
-                HeightCacheUpdate {
-                    full_rebuild: true,
-                }
+                HeightCacheUpdate { full_rebuild: true }
             } else {
                 // Extend cache with new messages only (same width/config)
                 let prev_len = self.msg_height_cache.len();

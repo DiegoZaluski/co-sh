@@ -3,8 +3,13 @@
 
 use std::collections::VecDeque;
 
-use super::{Harness, limits::{LOOP_DETECTION_MAX_REPEATS, LOOP_DETECTION_WINDOW_SIZE,
-    REPETITION_MAX_IDENTICAL, REPETITION_MIN_TEXT_LEN}};
+use super::{
+    Harness,
+    limits::{
+        LOOP_DETECTION_MAX_REPEATS, LOOP_DETECTION_WINDOW_SIZE, REPETITION_MAX_IDENTICAL,
+        REPETITION_MIN_TEXT_LEN,
+    },
+};
 
 /// What the textual-output repetition detector decided for this iteration.
 ///

@@ -321,8 +321,7 @@ fn computer_screenshot_save_path_asks_outside_project_root() {
     let inside_str = inside.to_str().unwrap();
 
     let args = serde_json::json!({ "save_path": inside_str });
-    let result =
-        check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
+    let result = check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
     assert!(
         matches!(result, PermissionCheck::Allowed),
         "save inside the project root is no approval matter, got {result:?}"
@@ -334,8 +333,7 @@ fn computer_screenshot_save_path_asks_outside_project_root() {
     // Windows, so a Linux run silently let it through.
     let outside = std::env::temp_dir().join("cosh_outside_root_shot.png");
     let args = serde_json::json!({ "save_path": outside.to_str().unwrap() });
-    let result =
-        check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
+    let result = check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
     assert!(
         matches!(result, PermissionCheck::NeedsApproval(_)),
         "save outside the project root must ask, got {result:?}"
@@ -350,8 +348,7 @@ fn computer_screenshot_save_path_asks_outside_project_root() {
         .with_file_name(format!("{root_name}_bar"))
         .join("shot.png");
     let args = serde_json::json!({ "save_path": sibling.to_str().unwrap() });
-    let result =
-        check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
+    let result = check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
     assert!(
         matches!(result, PermissionCheck::NeedsApproval(_)),
         "a prefix-sibling of the root is still outside it, got {result:?}"
@@ -361,8 +358,7 @@ fn computer_screenshot_save_path_asks_outside_project_root() {
     // the defensive default asks for even a plausible path.
     let outside_any = std::env::temp_dir().join("cosh_any_tmp_shot.png");
     let args = serde_json::json!({ "save_path": outside_any.to_str().unwrap() });
-    let result =
-        check_tool_permission("computer_screenshot", &args, Mode::Ask, None);
+    let result = check_tool_permission("computer_screenshot", &args, Mode::Ask, None);
     assert!(
         matches!(result, PermissionCheck::NeedsApproval(_)),
         "without a project root every absolute path asks, got {result:?}"

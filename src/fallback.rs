@@ -24,7 +24,9 @@ pub fn save_fallbacks(setup: &mut crate::setup::Setup, fallbacks: &[FallbackEntr
     setup.save();
 }
 
-pub fn load_prompt_corrector_fallbacks(setup: &crate::setup::Setup) -> Vec<PromptCorrectorFallback> {
+pub fn load_prompt_corrector_fallbacks(
+    setup: &crate::setup::Setup,
+) -> Vec<PromptCorrectorFallback> {
     setup.routing.fallback_prompt_corrector.clone()
 }
 

@@ -1592,11 +1592,21 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
         instances: 1,
     }]);
     app.sync_agents_pane_registry();
-    let handle = agent_coworkers::enqueue("cosh", "delegated work", agent_coworkers::MAIN, ReplyMode::Wait)
-        .expect("cosh pane is addressable");
+    let handle = agent_coworkers::enqueue(
+        "cosh",
+        "delegated work",
+        agent_coworkers::MAIN,
+        ReplyMode::Wait,
+    )
+    .expect("cosh pane is addressable");
     let rx = handle.receiver.expect("wait mode carries a receiver");
-    assert!(agent_coworkers::has_queued_request("cosh"), "request queued");
-    assert!(agent_coworkers::has_outstanding_requests(agent_coworkers::MAIN));
+    assert!(
+        agent_coworkers::has_queued_request("cosh"),
+        "request queued"
+    );
+    assert!(agent_coworkers::has_outstanding_requests(
+        agent_coworkers::MAIN
+    ));
 
     // Session B: NO pane set — the plainest hang reproduction: after the
     // switch nothing can ever dispatch the old request.
@@ -1628,7 +1638,10 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
     // registry serves, never the old session's leftovers.
     app.state.current_session_id = Some(a.clone());
     assert!(app.switch_session_locked(&a));
-    let ids: Vec<String> = agent_coworkers::list_coworkers().into_iter().map(|p| p.id).collect();
+    let ids: Vec<String> = agent_coworkers::list_coworkers()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
     assert!(
         ids.contains(&"cosh".to_string()),
         "pane re-registered: {ids:?}"
@@ -2340,7 +2353,10 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     // fails at the registry assertion, not at the serve step).
     app.sync_agents_pane_registry();
 
-    let ids: Vec<String> = agent_coworkers::list_coworkers().into_iter().map(|p| p.id).collect();
+    let ids: Vec<String> = agent_coworkers::list_coworkers()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
     assert!(
         ids.contains(&"cosh".to_string()),
         "cosh is registered: {ids:?}"
@@ -2353,9 +2369,17 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     // The MAIN loop delegates to the cosh pane: the request queues, the
     // queue service dispatches it (the manager pane routing is live), and the turn
     // is running.
-    let handle = agent_coworkers::enqueue("cosh", "do the work", agent_coworkers::MAIN, ReplyMode::Wait)
-        .expect("cosh pane is addressable");
-    assert!(agent_coworkers::has_queued_request("cosh"), "request queued");
+    let handle = agent_coworkers::enqueue(
+        "cosh",
+        "do the work",
+        agent_coworkers::MAIN,
+        ReplyMode::Wait,
+    )
+    .expect("cosh pane is addressable");
+    assert!(
+        agent_coworkers::has_queued_request("cosh"),
+        "request queued"
+    );
     app.serve_agents_pane_queues();
     assert!(
         !agent_coworkers::has_queued_request("cosh"),
@@ -2622,8 +2646,13 @@ async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
     // the pane kept working): the request is WAIT mode — an inline wait —
     // so simulate the ended waiter by completing the request AFTER the
     // handle is dropped into a dead receiver.
-    let handle = agent_coworkers::enqueue("cosh", "delegate the work", agent_coworkers::MAIN, ReplyMode::Wait)
-        .expect("cosh pane is addressable");
+    let handle = agent_coworkers::enqueue(
+        "cosh",
+        "delegate the work",
+        agent_coworkers::MAIN,
+        ReplyMode::Wait,
+    )
+    .expect("cosh pane is addressable");
     app.serve_agents_pane_queues();
     // The pane is running the delegated turn; the app is IDLE (no main
     // loop running — the state never went Working).
@@ -3543,7 +3572,8 @@ async fn agents_worktree_assign_executes_on_the_app_drain() {
         "the registry carries the new binding"
     );
     // The outcome is a Worktree delivery for the asking loop.
-    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     assert_eq!(
@@ -3613,7 +3643,10 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
             .is_some(),
         "no side effect before the answer"
     );
-    assert!(cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).is_empty());
+    assert!(
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN)
+            .is_empty()
+    );
 
     // The user declines: the binding is kept, the outcome still lands.
     app.resolve_pending_worktree_permission(
@@ -3629,7 +3662,8 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
         !app.permission_dialog.visible,
         "the answer closed the permission box"
     );
-    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     let note = deliveries[0].output.clone().unwrap_err();
@@ -3657,9 +3691,11 @@ async fn agents_worktree_ask_on_a_parked_split_executes_after_allow_once() {
         name: "worktree".into(),
         desc: String::new(),
     });
-    assert!(app.agents_split.as_ref().unwrap().panes[0]
-        .worktree
-        .is_some());
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some()
+    );
     // The user leaves the mode (park — the common shape of the report:
     // the main agent is asked from the NORMAL view).
     app.park_agents_split();
@@ -3677,7 +3713,10 @@ async fn agents_worktree_ask_on_a_parked_split_executes_after_allow_once() {
     app.serve_agents_pane_worktree_ops();
 
     // The SESSION permission box is up for the user's binding.
-    assert!(app.permission_dialog.visible, "the ask renders in the session box");
+    assert!(
+        app.permission_dialog.visible,
+        "the ask renders in the session box"
+    );
     assert!(app.pending_worktree_confirmation.is_some());
 
     // Allow Once: the confirmed clear REALLY clears (the fix).
@@ -3695,7 +3734,8 @@ async fn agents_worktree_ask_on_a_parked_split_executes_after_allow_once() {
         !app.worktree_agent_grant(),
         "AllowOnce does not latch the session grant"
     );
-    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     assert!(deliveries[0].output.clone().unwrap().contains("cleared"));
@@ -3724,12 +3764,16 @@ async fn agents_worktree_assign_executes_on_a_parked_split_without_a_box() {
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
 
-    assert!(!app.permission_dialog.visible, "no box for an agent binding");
+    assert!(
+        !app.permission_dialog.visible,
+        "no box for an agent binding"
+    );
     let pane = &app.parked_agents_split.as_ref().unwrap().panes[0];
     let pin = pane.worktree.as_ref().expect("the parked pane got pinned");
     assert_eq!(pin.branch, branch);
     assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::Agent);
-    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     assert!(deliveries[0].output.is_ok());
@@ -3774,14 +3818,17 @@ async fn agents_worktree_allow_latches_the_session_grant() {
         app.parked_agents_split.is_none() && app.agents_split.is_some(),
         "the binding actually changed (live split)"
     );
-    assert!(app.agents_split.as_ref().unwrap().panes[0]
-        .worktree
-        .is_none());
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_none()
+    );
     // Drain the first ask's outcome: the registry deliveries are GLOBAL
     // state — a leftover here would leak into the next test that reads
     // MAIN's deliveries.
     assert_eq!(
-        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).len(),
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN)
+            .len(),
         1
     );
 
@@ -3792,9 +3839,11 @@ async fn agents_worktree_allow_latches_the_session_grant() {
         name: "worktree".into(),
         desc: String::new(),
     });
-    assert!(app.agents_split.as_ref().unwrap().panes[0]
-        .worktree
-        .is_some());
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some()
+    );
     app.sync_agents_pane_registry();
 
     let op_id = cosh::harness::agent_coworkers::enqueue_worktree_op(
@@ -3810,10 +3859,13 @@ async fn agents_worktree_allow_latches_the_session_grant() {
         "the session grant skips the box"
     );
     assert!(app.pending_worktree_confirmation.is_none());
-    assert!(app.agents_split.as_ref().unwrap().panes[0]
-        .worktree
-        .is_none());
-    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_none()
+    );
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
 }
@@ -3848,13 +3900,7 @@ async fn agents_worktree_ask_holds_the_box_and_re_shows_a_parked_permission_requ
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
     assert!(app.permission_dialog.visible);
-    let ask_args = app
-        .permission_dialog
-        .request
-        .as_ref()
-        .unwrap()
-        .args
-        .clone();
+    let ask_args = app.permission_dialog.request.as_ref().unwrap().args.clone();
     assert!(ask_args.contains("claude"), "{ask_args}");
 
     // A harness permission request arrives while the ask holds the box:
@@ -3895,7 +3941,8 @@ async fn agents_worktree_ask_holds_the_box_and_re_shows_a_parked_permission_requ
     // Drain the ask's outcome: registry deliveries are GLOBAL state — a
     // leftover here would leak into the next test reading MAIN's box.
     assert_eq!(
-        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).len(),
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN)
+            .len(),
         1
     );
 }
@@ -4480,400 +4527,423 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         original.to_string_lossy(),
         "working_directory stays the original (it is the exit target)"
     );
-
 }
-    // ---- Issue 1: gate-free session-binding facts (variants C and A) ----
+// ---- Issue 1: gate-free session-binding facts (variants C and A) ----
 
-    /// Variant C — Ctrl+X during a turn whose resume fell back to
-    /// `session/new`: the winding-down turn's terminal Done is DROPPED by
-    /// the handler's pane-idle gate, which used to drop the new session id
-    /// with it (stale binding + an orphaned agent session). The gate-free
-    /// fact recorded by the turn task must survive the force-close and
-    /// promote BOTH the live pane and the persisted ref.
-    #[tokio::test]
-    async fn variant_c_a_force_closed_turns_binding_fact_promotes_the_pane() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        // Start from a clean fact registry: this suite shares the process
-        // with every other test, and a fact is consumed exactly once.
-        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
-        let mut app = App::new("/tmp".to_string());
-        let session_id = crate::session::store::generate_session_id();
+/// Variant C — Ctrl+X during a turn whose resume fell back to
+/// `session/new`: the winding-down turn's terminal Done is DROPPED by
+/// the handler's pane-idle gate, which used to drop the new session id
+/// with it (stale binding + an orphaned agent session). The gate-free
+/// fact recorded by the turn task must survive the force-close and
+/// promote BOTH the live pane and the persisted ref.
+#[tokio::test]
+async fn variant_c_a_force_closed_turns_binding_fact_promotes_the_pane() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    // Start from a clean fact registry: this suite shares the process
+    // with every other test, and a fact is consumed exactly once.
+    let _ = cosh::harness::agent_coworkers::drain_session_bindings();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "issue1 C".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    // The pane was Bound to "s-1" by an earlier turn.
+    let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
+    app.agents_split.as_mut().unwrap().panes[0].session_id = Some("s-1".into());
+    app.sync_agents_pane_registry();
+
+    // The turn runs; its resume of "s-1" failed and the harness fell
+    // back to a FRESH session "s-2" (the fact the Done used to carry).
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-2".into());
+
+    // Ctrl+X: the pane goes idle NOW; the turn's terminal Done arrives
+    // later against an idle pane and is dropped by the gate. The
+    // force-close path absorbs the fact itself.
+    app.interrupt_focused_pane();
+    assert!(
+        !app.agents_split.as_ref().unwrap().panes[0].running,
+        "the pane is force-closed"
+    );
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert_eq!(
+        pane.session_id.as_deref(),
+        Some("s-2"),
+        "the gate-free fact must bind the pane even though the Done was dropped"
+    );
+    assert_eq!(
         app.state
-            .add_empty_session(session_id.clone(), "issue1 C".into(), 0);
-        app.state.current_session_id = Some(session_id);
-        app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
-            name: "claude".into(),
-            instances: 1,
-        }]);
-        // The pane was Bound to "s-1" by an earlier turn.
-        let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
-        app.agents_split.as_mut().unwrap().panes[0].session_id = Some("s-1".into());
-        app.sync_agents_pane_registry();
-
-        // The turn runs; its resume of "s-1" failed and the harness fell
-        // back to a FRESH session "s-2" (the fact the Done used to carry).
-        app.agents_split.as_mut().unwrap().set_running(0, true);
-        cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-2".into());
-
-        // Ctrl+X: the pane goes idle NOW; the turn's terminal Done arrives
-        // later against an idle pane and is dropped by the gate. The
-        // force-close path absorbs the fact itself.
-        app.interrupt_focused_pane();
-        assert!(
-            !app.agents_split.as_ref().unwrap().panes[0].running,
-            "the pane is force-closed"
-        );
-
-        let pane = &app.agents_split.as_ref().unwrap().panes[0];
-        assert_eq!(
-            pane.session_id.as_deref(),
-            Some("s-2"),
-            "the gate-free fact must bind the pane even though the Done was dropped"
-        );
-        assert_eq!(
-            app.state.current_session().unwrap().agents_panes.clone().unwrap()[0],
-            crate::types::AgentPaneRef::Bound {
-                agent: "claude".into(),
-                session_id: "s-2".into(),
-                worktree: None,
-            },
-            "the persisted ref must carry the session the turn actually drove"
-        );
-
-        // The late REAL Done (still winding down, carrying the OLD id) must
-        // not overwrite the absorbed binding: the pane-idle gate drops it.
-        app.event_tx
-            .send(cosh::harness::HarnessEvent::AgentsPaneDone {
-                pane: 0,
-                pane_id,
-                epoch: app.agents_pane_epoch,
-                output: "late report".into(),
-                stop_reason: "cancelled".into(),
-                session: Some("s-1".into()),
-            })
-            .ok();
-        app.poll_events();
-        assert_eq!(
-            app.agents_split.as_ref().unwrap().panes[0].session_id.as_deref(),
-            Some("s-2"),
-            "a late Done against an idle pane must not rebind (gate intact)"
-        );
-        assert_eq!(
-            app.state.current_session().unwrap().agents_panes.clone().unwrap()[0]
-                .session_id(),
-            Some("s-2"),
-            "the persisted binding stays the absorbed one"
-        );
-    }
-
-    /// Variant A — hiding a pane whose FIRST turn is still running: the
-    /// terminal binding arrives against a pane object that answers to
-    /// nothing visible. The fact must promote the HIDDEN-stack entry (via
-    /// `HiddenPane::pane_id`) instead of being dropped — pre-fix, the first
-    /// turn's session was lost forever and the pane stayed unbound.
-    #[tokio::test]
-    async fn variant_a_a_hidden_panes_first_turn_binding_lands_in_the_hidden_stack() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
-        let mut app = App::new("/tmp".to_string());
-        let session_id = crate::session::store::generate_session_id();
-        app.state
-            .add_empty_session(session_id.clone(), "issue1 A".into(), 0);
-        app.state.current_session_id = Some(session_id);
-        // Built directly (not through the picker) so the agent name is one
-        // no harness can spawn: the restore path fires a cold-restore
-        // replay for the bound pane, and an unknown agent degrades to a
-        // toast instead of launching a real process.
-        let agent = "issue1-ghost-agent";
-        app.agents_split = Some(
-            crate::routes::session::agents_split::AgentsSplitState::new(vec![
-                crate::types::AgentPaneRef::Name(agent.into()),
-            ]),
-        );
-        if let Some(session) = app.state.current_session_mut() {
-            session.agents_panes =
-                Some(vec![crate::types::AgentPaneRef::Name(agent.into())]);
-            session.agents_mode_open = true;
-        }
-        app.sync_agents_pane_registry();
-
-        let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
-        app.agents_split.as_mut().unwrap().set_running(0, true);
-        // Hide the RUNNING pane (Backspace): the pane object leaves the
-        // split with its turn signal-stopped; the ref moves to the hidden
-        // stack still unbound, but carrying the pane object's identity.
-        app.hide_focused_agents_pane();
-        assert!(app.agents_split.is_none(), "the last visible pane hidden: the mode auto-closed");
-        {
-            let session = app.state.current_session().unwrap();
-            let hidden = session.agents_hidden.first().expect("hidden stack entry");
-            assert_eq!(hidden.pane_id, pane_id, "the hide must stamp the pane object id");
-            assert!(
-                hidden.pane.session_id().is_none(),
-                "the entry is still unbound at hide time"
-            );
-        }
-
-        // The turn finishes AFTER the hide: `acp::call` resolved a fresh
-        // session "s-A" and the turn task recorded the gate-free fact.
-        cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-A".into());
-        app.absorb_pane_session_bindings();
-
-        {
-            let session = app.state.current_session().unwrap();
-            let hidden = session.agents_hidden.first().expect("hidden stack entry");
-            assert_eq!(
-                hidden.pane.session_id(),
-                Some("s-A"),
-                "the hidden entry must be promoted to Bound by the absorbed fact"
-            );
-            assert_eq!(
-                hidden.pane.agent(),
-                agent,
-                "the promotion must keep the pane's agent"
-            );
-        }
-    }
-
-    /// Variant A, second half — restoring the promoted hidden entry
-    /// (Ctrl+Z) rebuilds the pane ALREADY BOUND, so the cold-restore
-    /// replay path picks the session up and rehydrates the timeline.
-    #[tokio::test]
-    async fn variant_a_a_restored_hidden_pane_comes_back_bound() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
-        let mut app = App::new("/tmp".to_string());
-        let session_id = crate::session::store::generate_session_id();
-        app.state
-            .add_empty_session(session_id.clone(), "issue1 A restore".into(), 0);
-        app.state.current_session_id = Some(session_id);
-        let agent = "issue1-ghost-agent";
-        app.agents_split = Some(
-            crate::routes::session::agents_split::AgentsSplitState::new(vec![
-                crate::types::AgentPaneRef::Name(agent.into()),
-            ]),
-        );
-        if let Some(session) = app.state.current_session_mut() {
-            session.agents_panes =
-                Some(vec![crate::types::AgentPaneRef::Name(agent.into())]);
-            session.agents_mode_open = true;
-        }
-        app.sync_agents_pane_registry();
-
-        let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
-        app.agents_split.as_mut().unwrap().set_running(0, true);
-        app.hide_focused_agents_pane();
-        cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-A".into());
-        app.absorb_pane_session_bindings();
-
-        // Ctrl+Z: the pane returns — bound, so its empty timeline is
-        // flagged for the cold-restore replay.
-        app.restore_last_hidden_agents_pane();
-        let pane = &app.agents_split.as_ref().unwrap().panes[0];
-        assert_eq!(
-            pane.session_id.as_deref(),
-            Some("s-A"),
-            "the restored pane must come back bound to the first turn's session"
-        );
-        assert_eq!(
-            app.state.current_session().unwrap().agents_panes.clone().unwrap()[0]
-                .session_id(),
-            Some("s-A"),
-            "the restored metadata entry stays Bound"
-        );
-    }
-
-    /// Anti-contamination: a binding fact whose pane object id answers to
-    /// NOTHING (a pane a rebuild dropped, a legacy hidden entry with
-    /// `pane_id = 0`) is dropped, never smeared onto a same-named
-    /// replacement — the structural counterpart of the event gates.
-    #[tokio::test]
-    async fn an_absorbed_binding_fact_without_an_owner_is_dropped() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
-        let mut app = App::new("/tmp".to_string());
-        let session_id = crate::session::store::generate_session_id();
-        app.state
-            .add_empty_session(session_id.clone(), "issue1 gate".into(), 0);
-        app.state.current_session_id = Some(session_id);
-        app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
-            name: "claude".into(),
-            instances: 1,
-        }]);
-
-        // An id that answers to no pane object, and the legacy `0`.
-        cosh::harness::agent_coworkers::record_session_binding(99_999, "s-x".into());
-        cosh::harness::agent_coworkers::record_session_binding(0, "s-y".into());
-        app.absorb_pane_session_bindings();
-
-        assert_eq!(
-            app.agents_split.as_ref().unwrap().panes[0].session_id,
-            None,
-            "an ownerless fact must never bind a same-named pane"
-        );
-        assert!(
-            app.state.current_session().unwrap().agents_panes.as_ref().unwrap()[0]
-                .session_id()
-                .is_none(),
-            "the persisted set stays unbound"
-        );
-        assert!(
-            cosh::harness::agent_coworkers::drain_session_bindings().is_empty(),
-            "the pass consumed every fact: nothing resurfaces later"
-        );
-    }
-
-    /// Gate regression — the Done handler's identity gate is untouched: a
-    /// terminal Done whose pane id answers to no pane (a pane the rebuild
-    /// dropped) delivers nothing and binds nothing, exactly as before the
-    /// fix. The binding vehicle being gate-free does not weaken the gates.
-    #[tokio::test]
-    async fn a_done_for_an_unknown_pane_id_still_delivers_nothing() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
-        let mut app = App::new("/tmp".to_string());
-        let session_id = crate::session::store::generate_session_id();
-        app.state
-            .add_empty_session(session_id.clone(), "issue1 routing".into(), 0);
-        app.state.current_session_id = Some(session_id);
-        app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
-            name: "claude".into(),
-            instances: 1,
-        }]);
-
-        app.event_tx
-            .send(cosh::harness::HarnessEvent::AgentsPaneDone {
-                pane: 0,
-                pane_id: 777_777,
-                epoch: app.agents_pane_epoch,
-                output: "stray report".into(),
-                stop_reason: "end_turn".into(),
-                session: Some("s-stray".into()),
-            })
-            .ok();
-        app.poll_events();
-        app.absorb_pane_session_bindings();
-
-        assert_eq!(
-            app.agents_split.as_ref().unwrap().panes[0].session_id,
-            None,
-            "a Done for an unknown pane id binds nothing (gate intact)"
-        );
-        assert!(
-            app.state.current_session().unwrap().agents_panes.as_ref().unwrap()[0]
-                .session_id()
-                .is_none()
-        );
-    }
-
-    // ── agents_compact: the App drain runs the PANE's own compaction ──
-
-    /// The drain's refusal path on an UNBOUND pane: the ask is popped (not
-    /// left parked), completed with the reason, and the in-flight guard is
-    /// cleared — so the pane is not blocked forever by a refusal, and the
-    /// asking loop's paused tool call gets a real answer instead of
-    /// hanging.
-    #[tokio::test]
-    async fn agents_compact_of_an_unbound_pane_is_refused_and_frees_the_guard() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        let (_dir, repo) = worktree_test_repo();
-        let app_repo = repo.clone();
-        let mut app = manager_worktree_split_app(&app_repo);
-        app.sync_agents_pane_registry();
-        let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
-
-        let op_id = cosh::harness::agent_coworkers::enqueue_compact_op(
-            crate::routes::session::agents_split::MANAGER_LABEL,
-            cosh::harness::agent_coworkers::MAIN,
-        )
-        .expect("the ask parks");
-        app.serve_agents_pane_compact_ops();
-
-        assert!(
-            cosh::harness::agent_coworkers::peek_compact_op().is_none(),
-            "the ask is popped, never left parked on a refusal"
-        );
-        assert!(
-            !cosh::harness::agent_coworkers::coworker_is_compacting(pane_id),
-            "a refusal clears the guard: the pane is usable again"
-        );
-        let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(deliveries[0].request_id, op_id);
-        assert_eq!(
-            deliveries[0].kind,
-            cosh::harness::agent_coworkers::DeliveryKind::Compact
-        );
-        let error = deliveries[0].output.clone().unwrap_err();
-        assert!(
-            error.contains("no bound session"),
-            "the refusal names the reason: {error}"
-        );
-        // The compaction never touched the main session's timeline: no
-        // "Summarizing" box was opened in it (the pane path is silent by
-        // design — its events go to a dedicated, discarded channel).
-        assert!(
-            app.state
-                .current_session()
-                .map(|s| s.messages.iter().all(|m| !m
-                    .parts
-                    .iter()
-                    .any(|p| matches!(p, crate::types::Part::Compaction(_)))))
-                .unwrap_or(true),
-            "the pane compaction must never paint into the main session"
-        );
-    }
-
-    /// A BUSY pane does NOT pop its ask: the drain retries on a later
-    /// frame, so a correctly-made ask waits for the pane's turn to finish
-    /// instead of failing.
-    #[tokio::test]
-    async fn agents_compact_waits_for_a_running_pane_instead_of_failing() {
-        let _guard = HOME_LOCK.lock();
-        isolate_home();
-        let (_dir, repo) = worktree_test_repo();
-        let app_repo = repo.clone();
-        let mut app = manager_worktree_split_app(&app_repo);
-        app.sync_agents_pane_registry();
-        let pane_label = crate::routes::session::agents_split::MANAGER_LABEL;
-        let op_id = cosh::harness::agent_coworkers::enqueue_compact_op(
-            pane_label,
-            cosh::harness::agent_coworkers::MAIN,
-        )
-        .expect("the ask parks");
-
-        // The pane is mid-turn: the drain must leave the ask parked.
-        app.agents_split
-            .as_mut()
+            .current_session()
             .unwrap()
-            .set_running(0, true);
-        app.serve_agents_pane_compact_ops();
-        let still = cosh::harness::agent_coworkers::peek_compact_op().expect("the ask stays parked");
-        assert_eq!(still.id, op_id, "not popped while the pane is busy");
-        assert!(
-            !cosh::harness::agent_coworkers::coworker_is_compacting(still.coworker_id),
-            "a parked ask reserves nothing yet"
-        );
-        assert!(
-            cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).is_empty(),
-            "no outcome while the ask is still parked"
-        );
+            .agents_panes
+            .clone()
+            .unwrap()[0],
+        crate::types::AgentPaneRef::Bound {
+            agent: "claude".into(),
+            session_id: "s-2".into(),
+            worktree: None,
+        },
+        "the persisted ref must carry the session the turn actually drove"
+    );
 
-        // The turn ends: the next frame's drain resolves it (here: refused
-        // for the missing session, which is the point — it MOVED).
-        app.agents_split
-            .as_mut()
+    // The late REAL Done (still winding down, carrying the OLD id) must
+    // not overwrite the absorbed binding: the pane-idle gate drops it.
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            pane_id,
+            epoch: app.agents_pane_epoch,
+            output: "late report".into(),
+            stop_reason: "cancelled".into(),
+            session: Some("s-1".into()),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .session_id
+            .as_deref(),
+        Some("s-2"),
+        "a late Done against an idle pane must not rebind (gate intact)"
+    );
+    assert_eq!(
+        app.state
+            .current_session()
             .unwrap()
-            .set_running(0, false);
-        app.serve_agents_pane_compact_ops();
-        assert!(cosh::harness::agent_coworkers::peek_compact_op().is_none());
-        let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(deliveries[0].request_id, op_id);
+            .agents_panes
+            .clone()
+            .unwrap()[0]
+            .session_id(),
+        Some("s-2"),
+        "the persisted binding stays the absorbed one"
+    );
+}
+
+/// Variant A — hiding a pane whose FIRST turn is still running: the
+/// terminal binding arrives against a pane object that answers to
+/// nothing visible. The fact must promote the HIDDEN-stack entry (via
+/// `HiddenPane::pane_id`) instead of being dropped — pre-fix, the first
+/// turn's session was lost forever and the pane stayed unbound.
+#[tokio::test]
+async fn variant_a_a_hidden_panes_first_turn_binding_lands_in_the_hidden_stack() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let _ = cosh::harness::agent_coworkers::drain_session_bindings();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "issue1 A".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    // Built directly (not through the picker) so the agent name is one
+    // no harness can spawn: the restore path fires a cold-restore
+    // replay for the bound pane, and an unknown agent degrades to a
+    // toast instead of launching a real process.
+    let agent = "issue1-ghost-agent";
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec![crate::types::AgentPaneRef::Name(agent.into())],
+    ));
+    if let Some(session) = app.state.current_session_mut() {
+        session.agents_panes = Some(vec![crate::types::AgentPaneRef::Name(agent.into())]);
+        session.agents_mode_open = true;
     }
+    app.sync_agents_pane_registry();
+
+    let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    // Hide the RUNNING pane (Backspace): the pane object leaves the
+    // split with its turn signal-stopped; the ref moves to the hidden
+    // stack still unbound, but carrying the pane object's identity.
+    app.hide_focused_agents_pane();
+    assert!(
+        app.agents_split.is_none(),
+        "the last visible pane hidden: the mode auto-closed"
+    );
+    {
+        let session = app.state.current_session().unwrap();
+        let hidden = session.agents_hidden.first().expect("hidden stack entry");
+        assert_eq!(
+            hidden.pane_id, pane_id,
+            "the hide must stamp the pane object id"
+        );
+        assert!(
+            hidden.pane.session_id().is_none(),
+            "the entry is still unbound at hide time"
+        );
+    }
+
+    // The turn finishes AFTER the hide: `acp::call` resolved a fresh
+    // session "s-A" and the turn task recorded the gate-free fact.
+    cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-A".into());
+    app.absorb_pane_session_bindings();
+
+    {
+        let session = app.state.current_session().unwrap();
+        let hidden = session.agents_hidden.first().expect("hidden stack entry");
+        assert_eq!(
+            hidden.pane.session_id(),
+            Some("s-A"),
+            "the hidden entry must be promoted to Bound by the absorbed fact"
+        );
+        assert_eq!(
+            hidden.pane.agent(),
+            agent,
+            "the promotion must keep the pane's agent"
+        );
+    }
+}
+
+/// Variant A, second half — restoring the promoted hidden entry
+/// (Ctrl+Z) rebuilds the pane ALREADY BOUND, so the cold-restore
+/// replay path picks the session up and rehydrates the timeline.
+#[tokio::test]
+async fn variant_a_a_restored_hidden_pane_comes_back_bound() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let _ = cosh::harness::agent_coworkers::drain_session_bindings();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "issue1 A restore".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    let agent = "issue1-ghost-agent";
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec![crate::types::AgentPaneRef::Name(agent.into())],
+    ));
+    if let Some(session) = app.state.current_session_mut() {
+        session.agents_panes = Some(vec![crate::types::AgentPaneRef::Name(agent.into())]);
+        session.agents_mode_open = true;
+    }
+    app.sync_agents_pane_registry();
+
+    let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    app.hide_focused_agents_pane();
+    cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-A".into());
+    app.absorb_pane_session_bindings();
+
+    // Ctrl+Z: the pane returns — bound, so its empty timeline is
+    // flagged for the cold-restore replay.
+    app.restore_last_hidden_agents_pane();
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert_eq!(
+        pane.session_id.as_deref(),
+        Some("s-A"),
+        "the restored pane must come back bound to the first turn's session"
+    );
+    assert_eq!(
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .clone()
+            .unwrap()[0]
+            .session_id(),
+        Some("s-A"),
+        "the restored metadata entry stays Bound"
+    );
+}
+
+/// Anti-contamination: a binding fact whose pane object id answers to
+/// NOTHING (a pane a rebuild dropped, a legacy hidden entry with
+/// `pane_id = 0`) is dropped, never smeared onto a same-named
+/// replacement — the structural counterpart of the event gates.
+#[tokio::test]
+async fn an_absorbed_binding_fact_without_an_owner_is_dropped() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let _ = cosh::harness::agent_coworkers::drain_session_bindings();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "issue1 gate".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+
+    // An id that answers to no pane object, and the legacy `0`.
+    cosh::harness::agent_coworkers::record_session_binding(99_999, "s-x".into());
+    cosh::harness::agent_coworkers::record_session_binding(0, "s-y".into());
+    app.absorb_pane_session_bindings();
+
+    assert_eq!(
+        app.agents_split.as_ref().unwrap().panes[0].session_id,
+        None,
+        "an ownerless fact must never bind a same-named pane"
+    );
+    assert!(
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .as_ref()
+            .unwrap()[0]
+            .session_id()
+            .is_none(),
+        "the persisted set stays unbound"
+    );
+    assert!(
+        cosh::harness::agent_coworkers::drain_session_bindings().is_empty(),
+        "the pass consumed every fact: nothing resurfaces later"
+    );
+}
+
+/// Gate regression — the Done handler's identity gate is untouched: a
+/// terminal Done whose pane id answers to no pane (a pane the rebuild
+/// dropped) delivers nothing and binds nothing, exactly as before the
+/// fix. The binding vehicle being gate-free does not weaken the gates.
+#[tokio::test]
+async fn a_done_for_an_unknown_pane_id_still_delivers_nothing() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let _ = cosh::harness::agent_coworkers::drain_session_bindings();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "issue1 routing".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            pane_id: 777_777,
+            epoch: app.agents_pane_epoch,
+            output: "stray report".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("s-stray".into()),
+        })
+        .ok();
+    app.poll_events();
+    app.absorb_pane_session_bindings();
+
+    assert_eq!(
+        app.agents_split.as_ref().unwrap().panes[0].session_id,
+        None,
+        "a Done for an unknown pane id binds nothing (gate intact)"
+    );
+    assert!(
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .as_ref()
+            .unwrap()[0]
+            .session_id()
+            .is_none()
+    );
+}
+
+// ── agents_compact: the App drain runs the PANE's own compaction ──
+
+/// The drain's refusal path on an UNBOUND pane: the ask is popped (not
+/// left parked), completed with the reason, and the in-flight guard is
+/// cleared — so the pane is not blocked forever by a refusal, and the
+/// asking loop's paused tool call gets a real answer instead of
+/// hanging.
+#[tokio::test]
+async fn agents_compact_of_an_unbound_pane_is_refused_and_frees_the_guard() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = manager_worktree_split_app(&app_repo);
+    app.sync_agents_pane_registry();
+    let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
+
+    let op_id = cosh::harness::agent_coworkers::enqueue_compact_op(
+        crate::routes::session::agents_split::MANAGER_LABEL,
+        cosh::harness::agent_coworkers::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_compact_ops();
+
+    assert!(
+        cosh::harness::agent_coworkers::peek_compact_op().is_none(),
+        "the ask is popped, never left parked on a refusal"
+    );
+    assert!(
+        !cosh::harness::agent_coworkers::coworker_is_compacting(pane_id),
+        "a refusal clears the guard: the pane is usable again"
+    );
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+    assert_eq!(
+        deliveries[0].kind,
+        cosh::harness::agent_coworkers::DeliveryKind::Compact
+    );
+    let error = deliveries[0].output.clone().unwrap_err();
+    assert!(
+        error.contains("no bound session"),
+        "the refusal names the reason: {error}"
+    );
+    // The compaction never touched the main session's timeline: no
+    // "Summarizing" box was opened in it (the pane path is silent by
+    // design — its events go to a dedicated, discarded channel).
+    assert!(
+        app.state
+            .current_session()
+            .map(|s| s.messages.iter().all(|m| !m
+                .parts
+                .iter()
+                .any(|p| matches!(p, crate::types::Part::Compaction(_)))))
+            .unwrap_or(true),
+        "the pane compaction must never paint into the main session"
+    );
+}
+
+/// A BUSY pane does NOT pop its ask: the drain retries on a later
+/// frame, so a correctly-made ask waits for the pane's turn to finish
+/// instead of failing.
+#[tokio::test]
+async fn agents_compact_waits_for_a_running_pane_instead_of_failing() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = manager_worktree_split_app(&app_repo);
+    app.sync_agents_pane_registry();
+    let pane_label = crate::routes::session::agents_split::MANAGER_LABEL;
+    let op_id = cosh::harness::agent_coworkers::enqueue_compact_op(
+        pane_label,
+        cosh::harness::agent_coworkers::MAIN,
+    )
+    .expect("the ask parks");
+
+    // The pane is mid-turn: the drain must leave the ask parked.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    app.serve_agents_pane_compact_ops();
+    let still = cosh::harness::agent_coworkers::peek_compact_op().expect("the ask stays parked");
+    assert_eq!(still.id, op_id, "not popped while the pane is busy");
+    assert!(
+        !cosh::harness::agent_coworkers::coworker_is_compacting(still.coworker_id),
+        "a parked ask reserves nothing yet"
+    );
+    assert!(
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN)
+            .is_empty(),
+        "no outcome while the ask is still parked"
+    );
+
+    // The turn ends: the next frame's drain resolves it (here: refused
+    // for the missing session, which is the point — it MOVED).
+    app.agents_split.as_mut().unwrap().set_running(0, false);
+    app.serve_agents_pane_compact_ops();
+    assert!(cosh::harness::agent_coworkers::peek_compact_op().is_none());
+    let deliveries =
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+}

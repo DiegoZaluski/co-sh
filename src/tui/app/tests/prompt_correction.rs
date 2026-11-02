@@ -23,7 +23,9 @@ async fn correction_failure_keeps_the_original_prompt() {
     app.prompt_view.cursor_pos = app.prompt_view.input.len();
     app.prompt_correction_active = true;
     app.prompt_correction_spinner = Some(crate::component::any_spinner::AnySpinner::new(
-        "", &app.theme, cosh::setup::SpinnerStyle::Bass,
+        "",
+        &app.theme,
+        cosh::setup::SpinnerStyle::Bass,
     ));
 
     app.event_tx
@@ -114,7 +116,9 @@ async fn esc_cancels_the_in_flight_correction_and_keeps_the_draft() {
     app.prompt_view.cursor_pos = app.prompt_view.input.len();
     app.prompt_correction_active = true;
     app.prompt_correction_spinner = Some(crate::component::any_spinner::AnySpinner::new(
-        "", &app.theme, cosh::setup::SpinnerStyle::Bass,
+        "",
+        &app.theme,
+        cosh::setup::SpinnerStyle::Bass,
     ));
 
     app.process_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))

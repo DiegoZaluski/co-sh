@@ -182,9 +182,7 @@ impl Harness {
                  final report.]"
                     .to_string()
             }
-            ResumeCause::PendingTodos => {
-                todo_rerun_message(listed_open_items.as_deref())
-            }
+            ResumeCause::PendingTodos => todo_rerun_message(listed_open_items.as_deref()),
         };
         let reasoning = std::mem::take(&mut self.attempt_reasoning);
         if !reasoning.trim().is_empty() {

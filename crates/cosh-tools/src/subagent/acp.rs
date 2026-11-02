@@ -149,8 +149,7 @@ impl Agent {
         if name.trim().is_empty() || launch.is_empty() {
             return None;
         }
-        let leak =
-            |s: &str| Box::leak(s.to_string().into_boxed_str()) as &'static str;
+        let leak = |s: &str| Box::leak(s.to_string().into_boxed_str()) as &'static str;
         // The whole word slice is leaked too, so `split_first` refs outlive
         // this call the same way the strings do.
         let words: &'static [&'static str] = Box::leak(
@@ -305,10 +304,7 @@ pub fn register_custom_agents(entries: &[(String, String)]) -> Result<(), String
                 "'{name}' must be a single word (it is the agent id the model calls)."
             ));
         }
-        if ACP_AGENTS
-            .iter()
-            .any(|a| a.name.eq_ignore_ascii_case(name))
-        {
+        if ACP_AGENTS.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
             return Err(format!(
                 "'{name}' is a built-in agent and cannot be registered again."
             ));
@@ -316,9 +312,8 @@ pub fn register_custom_agents(entries: &[(String, String)]) -> Result<(), String
         if agents.iter().any(|a: &Agent| a.name == name) {
             return Err(format!("'{name}' is registered more than once."));
         }
-        let agent = Agent::from_launch_line(name, launch).ok_or_else(|| {
-            format!("'{name}' needs a launch command, e.g. my-agent --acp.")
-        })?;
+        let agent = Agent::from_launch_line(name, launch)
+            .ok_or_else(|| format!("'{name}' needs a launch command, e.g. my-agent --acp."))?;
         agents.push(agent);
     }
     *CUSTOM_AGENTS
@@ -368,11 +363,7 @@ pub fn register_custom_agents_lossy(entries: &[(String, String)]) -> Vec<String>
 
 /// Validate one entry against the entries accepted before it (the shared
 /// kernel of [`register_custom_agents`] and [`register_custom_agents_lossy`]).
-fn register_probe(
-    accepted: &[(String, String)],
-    name: &str,
-    launch: &str,
-) -> Result<(), String> {
+fn register_probe(accepted: &[(String, String)], name: &str, launch: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("Agent name is required.".into());
@@ -382,10 +373,7 @@ fn register_probe(
             "'{name}' must be a single word (it is the agent id the model calls)."
         ));
     }
-    if ACP_AGENTS
-        .iter()
-        .any(|a| a.name.eq_ignore_ascii_case(name))
-    {
+    if ACP_AGENTS.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
         return Err(format!(
             "'{name}' is a built-in agent and cannot be registered again."
         ));
@@ -394,7 +382,9 @@ fn register_probe(
         return Err(format!("'{name}' is registered more than once."));
     }
     if Agent::from_launch_line(name, launch).is_none() {
-        return Err(format!("'{name}' needs a launch command, e.g. my-agent --acp."));
+        return Err(format!(
+            "'{name}' needs a launch command, e.g. my-agent --acp."
+        ));
     }
     Ok(())
 }
@@ -926,9 +916,9 @@ pub async fn call(
     resume: Option<String>,
     picks: &[(String, String)],
     mode: Option<&str>,
-    permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
-        super::events::PanePermissionAnswer,
-    >>,
+    permission_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<super::events::PanePermissionAnswer>,
+    >,
     cwd: PathBuf,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
@@ -1045,21 +1035,18 @@ pub async fn replay(
 ) -> Result<(), String> {
     validate_agent(agent)?;
     let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
-    let launcher = agent_launcher(&entry)?
-        .with_debug(|line, direction| {
-            if matches!(direction, LineDirection::Stderr) {
-                log::debug!("subagent ACP stderr: {line}");
-            }
-        });
+    let launcher = agent_launcher(&entry)?.with_debug(|line, direction| {
+        if matches!(direction, LineDirection::Stderr) {
+            log::debug!("subagent ACP stderr: {line}");
+        }
+    });
 
     tokio::task::spawn_blocking(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("failed to build ACP runtime: {e}"))?
-            .block_on(run_replay_session(
-                launcher, session_id, cwd, chunk_tx,
-            ))
+            .block_on(run_replay_session(launcher, session_id, cwd, chunk_tx))
     })
     .await
     .map_err(|e| format!("sub-agent task failed: {e}"))?
@@ -1094,9 +1081,7 @@ where
                 // (the same variants a live turn streams), so the same
                 // mapping reconstructs the timeline. Message chunks feed
                 // NO closure here — a rehydrate pass returns no report.
-                if let Some(event) =
-                    SubagentEvent::from_session_update(notification.update)
-                {
+                if let Some(event) = SubagentEvent::from_session_update(notification.update) {
                     let _ = chunk_tx.send(event);
                 }
                 Ok(())
@@ -1131,17 +1116,10 @@ where
             let loaded = match loaded {
                 Ok(loaded) => loaded,
                 Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
-                    authenticate_on_auth_required(
-                        &connection,
-                        &init.auth_methods,
-                        &auth_error,
-                    )
-                    .await?;
+                    authenticate_on_auth_required(&connection, &init.auth_methods, &auth_error)
+                        .await?;
                     connection
-                        .send_request(LoadSessionRequest::new(
-                            SessionId::new(session_id),
-                            cwd,
-                        ))
+                        .send_request(LoadSessionRequest::new(SessionId::new(session_id), cwd))
                         .block_task()
                         .await
                         .map_err(|e| wrap_acp_failure("ACP session/load failed", e))?
@@ -1274,21 +1252,18 @@ pub async fn session_snapshot(
     // canonicalize here; an unresolvable path keeps the original and fails
     // at the harness with the same clarity as before.
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-    let launcher = agent_launcher(&entry)?
-        .with_debug(|line, direction| {
-            if matches!(direction, LineDirection::Stderr) {
-                log::debug!("subagent ACP stderr: {line}");
-            }
-        });
+    let launcher = agent_launcher(&entry)?.with_debug(|line, direction| {
+        if matches!(direction, LineDirection::Stderr) {
+            log::debug!("subagent ACP stderr: {line}");
+        }
+    });
 
     tokio::task::spawn_blocking(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("failed to build ACP runtime: {e}"))?
-            .block_on(run_snapshot_session(
-                launcher, session_id, cwd,
-            ))
+            .block_on(run_snapshot_session(launcher, session_id, cwd))
     })
     .await
     .map_err(|e| format!("sub-agent task failed: {e}"))?
@@ -1396,7 +1371,10 @@ where
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .config_options = Some(
-                    options.iter().map(super::events::mirror_config_option).collect(),
+                    options
+                        .iter()
+                        .map(super::events::mirror_config_option)
+                        .collect(),
                 );
             }
             if let Some((current, modes)) = &open.modes {
@@ -1418,7 +1396,6 @@ where
         .await
         .map_err(|e| format!("ACP connection failed: {e}"))
 }
-
 
 /// Whether the agent harness supports resuming sessions, read from the
 /// capabilities advertised at `initialize`. Both ACP mechanisms count:
@@ -1621,7 +1598,10 @@ async fn authenticate_on_auth_required(
             .await
         {
             Ok(_) => {
-                log::debug!("sub-agent ACP authenticated with method '{}'", method.id().0);
+                log::debug!(
+                    "sub-agent ACP authenticated with method '{}'",
+                    method.id().0
+                );
                 return Ok(());
             }
             Err(e) => {
@@ -1675,7 +1655,9 @@ async fn apply_session_picks(
 ) -> Result<(), AcpError> {
     let options = config_options.unwrap_or_default();
     for (config_id, value) in picks {
-        let Some(option) = options.iter().find(|option| option.id.0.as_ref() == config_id)
+        let Some(option) = options
+            .iter()
+            .find(|option| option.id.0.as_ref() == config_id)
         else {
             log::debug!("sub-agent ACP pick '{config_id}' skipped: option not advertised");
             continue;
@@ -1887,9 +1869,9 @@ pub(crate) async fn run_session<T>(
     cwd: PathBuf,
     picks: &[(String, String)],
     mode: Option<String>,
-    permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
-        super::events::PanePermissionAnswer,
-    >>,
+    permission_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<super::events::PanePermissionAnswer>,
+    >,
     accumulated: Arc<Mutex<super::closure::TurnClosure>>,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,

@@ -677,8 +677,7 @@ async fn spinner_activity_ignores_noise_deltas() {
 
     let mut app = App::new("/tmp".to_string());
     let id = crate::session::store::generate_session_id();
-    app.state
-        .add_empty_session(id.clone(), "noise".into(), 0);
+    app.state.add_empty_session(id.clone(), "noise".into(), 0);
     app.state.current_session_id = Some(id);
     app.agent_activity = crate::types::AgentActivity::Working;
     app.agent_spinner = Some(crate::component::any_spinner::AnySpinner::new(
@@ -830,8 +829,8 @@ async fn agents_mode_right_panel_shows_the_main_agent_not_a_list() {
         app.right_panel_visible(120),
         "the explicit open shows the panel in agent mode"
     );
-    let mirror = &app.state.right_panel.pty_sessions
-        [app.state.right_panel.main_mirror_index().unwrap()];
+    let mirror =
+        &app.state.right_panel.pty_sessions[app.state.right_panel.main_mirror_index().unwrap()];
     let timeline = &mirror.subagent_activity.timeline;
     assert!(
         timeline.iter().any(|e| matches!(
@@ -872,8 +871,7 @@ async fn agents_mode_right_panel_shows_the_main_agent_not_a_list() {
     app.close_main_mirror();
     assert!(!app.main_mirror_open());
     assert_eq!(
-        app.state.right_panel.subagent_list_mode,
-        list_mode_before,
+        app.state.right_panel.subagent_list_mode, list_mode_before,
         "the mirror lifecycle leaves the list-mode state exactly as it was"
     );
     assert!(
@@ -927,9 +925,11 @@ async fn mirror_follows_every_visible_event_like_the_subagents() {
     // Subagent band here): without it `scroll_up_at`/`scroll_down_at` find
     // no section and are no-ops, so the wheel-driven follow pause below
     // could not be driven like on a real screen.
-    app.state
-        .right_panel
-        .push_section_layout(crate::routes::session::right_panel::types::SectionKind::Subagent, 0, 20);
+    app.state.right_panel.push_section_layout(
+        crate::routes::session::right_panel::types::SectionKind::Subagent,
+        0,
+        20,
+    );
 
     // Pure narration deltas (NO tool calls): each visible change must
     // re-arm the sentinel — this is the case the old code left dead.
@@ -960,7 +960,9 @@ async fn mirror_follows_every_visible_event_like_the_subagents() {
     app.state.right_panel.scroll_up_at(5, 3);
     assert!(app.state.right_panel.is_scrolled_up());
     app.event_tx
-        .send(HarnessEvent::Token { text: "mais".into() })
+        .send(HarnessEvent::Token {
+            text: "mais".into(),
+        })
         .ok();
     app.poll_events();
     assert!(
@@ -972,7 +974,9 @@ async fn mirror_follows_every_visible_event_like_the_subagents() {
     // and the next delta keeps the pin.
     app.state.right_panel.scroll_to_bottom();
     app.event_tx
-        .send(HarnessEvent::Token { text: " fim".into() })
+        .send(HarnessEvent::Token {
+            text: " fim".into(),
+        })
         .ok();
     app.poll_events();
     assert_eq!(
@@ -1050,11 +1054,7 @@ async fn mid_stream_reset_keeps_the_thought_bubble_instead_of_blinking() {
     app.poll_events();
     let staged_id = {
         let session = app.state.current_session().unwrap();
-        assert_eq!(
-            session.messages.len(),
-            2,
-            "the Thought bubble is on screen"
-        );
+        assert_eq!(session.messages.len(), 2, "the Thought bubble is on screen");
         session.messages[1].id.clone()
     };
 
@@ -1078,9 +1078,7 @@ async fn mid_stream_reset_keeps_the_thought_bubble_instead_of_blinking() {
     // bubble nor wipe the staged partial (the replace happens on the first
     // REAL delta only).
     app.event_tx
-        .send(HarnessEvent::Token {
-            text: " ".into(),
-        })
+        .send(HarnessEvent::Token { text: " ".into() })
         .ok();
     app.poll_events();
     {
@@ -1114,7 +1112,10 @@ async fn mid_stream_reset_keeps_the_thought_bubble_instead_of_blinking() {
         );
         assert_eq!(session.messages[1].id, staged_id);
         let crate::types::Part::Reasoning(r) = &session.messages[1].parts[0] else {
-            panic!("expected a reasoning part, got {:?}", session.messages[1].parts);
+            panic!(
+                "expected a reasoning part, got {:?}",
+                session.messages[1].parts
+            );
         };
         assert_eq!(
             r.text, "retried thought",
@@ -1154,7 +1155,11 @@ async fn mid_stream_reset_keeps_the_thought_bubble_instead_of_blinking() {
     app.poll_events();
     let stale_id = {
         let session = app.state.current_session().unwrap();
-        assert_eq!(session.messages.len(), 3, "a new attempt opens a new bubble");
+        assert_eq!(
+            session.messages.len(),
+            3,
+            "a new attempt opens a new bubble"
+        );
         session.messages[2].id.clone()
     };
     app.event_tx.send(HarnessEvent::ClearAssistant).ok();
@@ -1176,7 +1181,11 @@ async fn mid_stream_reset_keeps_the_thought_bubble_instead_of_blinking() {
     assert!(
         !session.messages.iter().any(|m| m.id == stale_id),
         "the never-re-streamed partial is pruned at turn end; messages={:?}",
-        session.messages.iter().map(|m| (m.id.clone(), m.parts.len())).collect::<Vec<_>>()
+        session
+            .messages
+            .iter()
+            .map(|m| (m.id.clone(), m.parts.len()))
+            .collect::<Vec<_>>()
     );
     assert!(
         session.messages.iter().any(|m| m.id == staged_id),

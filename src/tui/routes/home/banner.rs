@@ -124,9 +124,7 @@ impl BannerView {
         let inside = |area: Option<Rect>| -> bool {
             area.is_some_and(|a| x >= a.x && x < a.right() && y >= a.y && y < a.bottom())
         };
-        if matches!(self.status, UpdateStatus::Idle)
-            && inside(self.button_area)
-        {
+        if matches!(self.status, UpdateStatus::Idle) && inside(self.button_area) {
             return Some(BannerAction::StartUpdate);
         }
         if inside(self.link_area) {

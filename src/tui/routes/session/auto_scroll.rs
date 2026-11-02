@@ -45,7 +45,12 @@ impl SessionView {
 }
 
 impl SessionView {
-    pub(super) fn handle_auto_scroll(&mut self, delta_time: f64, _total_height: i32, visible_height: i32) {
+    pub(super) fn handle_auto_scroll(
+        &mut self,
+        delta_time: f64,
+        _total_height: i32,
+        visible_height: i32,
+    ) {
         if !self.is_auto_scrolling {
             return;
         }

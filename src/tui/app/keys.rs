@@ -684,11 +684,13 @@ impl App {
                 } else {
                     match key.code {
                         KeyCode::Up => {
-                            self.permission_dialog.selected = (self.permission_dialog.selected + 2) % 3;
+                            self.permission_dialog.selected =
+                                (self.permission_dialog.selected + 2) % 3;
                             return Ok(false);
                         }
                         KeyCode::Down => {
-                            self.permission_dialog.selected = (self.permission_dialog.selected + 1) % 3;
+                            self.permission_dialog.selected =
+                                (self.permission_dialog.selected + 1) % 3;
                             return Ok(false);
                         }
                         KeyCode::Enter => {

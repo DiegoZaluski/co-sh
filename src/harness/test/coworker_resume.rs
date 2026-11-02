@@ -46,9 +46,9 @@ fn pane() -> Harness {
 }
 
 fn has_toast(events: &[HarnessEvent], needle: &str) -> bool {
-    events.iter().any(
-        |e| matches!(e, HarnessEvent::Toast { message, .. } if message.contains(needle)),
-    )
+    events
+        .iter()
+        .any(|e| matches!(e, HarnessEvent::Toast { message, .. } if message.contains(needle)))
 }
 
 /// THE REGRESSION: the natural-stop budget is spent and the model returns
@@ -126,7 +126,11 @@ async fn a_pane_stops_once_its_resume_budget_is_spent() {
 
     let (h, events) = drive(h).await;
 
-    assert_eq!(h.coworker_resumes_left(), 0, "every resume must consume budget");
+    assert_eq!(
+        h.coworker_resumes_left(),
+        0,
+        "every resume must consume budget"
+    );
     assert_eq!(
         h.context_manager.final_answer(),
         None,
@@ -146,7 +150,8 @@ async fn the_user_stop_is_never_resumed() {
     let mut h = pane();
     let stopped = AtomicBool::new(true);
     assert!(
-        h.resume_pane_turn(&stopped, ResumeCause::EmptyStop, None).is_none(),
+        h.resume_pane_turn(&stopped, ResumeCause::EmptyStop, None)
+            .is_none(),
         "a user stop must stand: resuming would override a deliberate interrupt"
     );
     assert_eq!(
@@ -242,9 +247,7 @@ async fn tool_loop_detection_recovers_a_pane_once_before_stopping() {
     // (window full), RECOVER (one steering attempt), and the model must
     // deliver the report on the next turn instead of repeating the call.
     let call = r#"{"name": "test_tool", "arguments": {"x": "same"}}"#;
-    let mut streams: Vec<Result<Vec<&str>, &str>> = (0..20)
-        .map(|_| Ok(vec![call]))
-        .collect();
+    let mut streams: Vec<Result<Vec<&str>, &str>> = (0..20).map(|_| Ok(vec![call])).collect();
     // After the recovery steering lands, the model changes behavior.
     streams[10] = Ok(vec!["the report"]);
     let mut h = pane()
@@ -263,7 +266,10 @@ async fn tool_loop_detection_recovers_a_pane_once_before_stopping() {
     let items: Vec<ContextItem> = h.context_manager.items_snapshot();
     match items.last() {
         Some(ContextItem::Closure { content, .. }) => {
-            assert_eq!(content, "the report", "the recovery must let the pane deliver")
+            assert_eq!(
+                content, "the report",
+                "the recovery must let the pane deliver"
+            )
         }
         other => panic!("the pane must recover from the tool-loop firing, got {other:?}"),
     }
@@ -283,9 +289,7 @@ async fn tool_loop_detection_recovers_once_then_stops_on_the_second_firing() {
     // firing at iteration 10's end-of-iteration check → recovery);
     // iteration 11 repeats the call again → second firing → Stopped.
     let call = r#"{"name": "test_tool", "arguments": {"x": "same"}}"#;
-    let streams: Vec<Result<Vec<&str>, &str>> = (0..11)
-        .map(|_| Ok(vec![call]))
-        .collect();
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..11).map(|_| Ok(vec![call])).collect();
     let mut h = pane()
         .with_test_tool(
             "test_tool",

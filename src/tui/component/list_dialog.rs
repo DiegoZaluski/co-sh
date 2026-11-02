@@ -333,7 +333,10 @@ pub fn compute_layout(
     // one bottom padding row leave the rest.
     let chrome = 3 + u16::from(subtitle) + u16::from(search);
     let max_visible_height = area.height.saturating_sub(chrome) as usize;
-    let max_visible = max_visible_height.min(rows.max(1)).min(max_visible_cap).max(1);
+    let max_visible = max_visible_height
+        .min(rows.max(1))
+        .min(max_visible_cap)
+        .max(1);
     let height = max_visible as u16 + chrome;
     let y = area.y + area.height.saturating_sub(height) / 2;
 

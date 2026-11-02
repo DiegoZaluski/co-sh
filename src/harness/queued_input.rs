@@ -118,7 +118,11 @@ impl QueuedInput {
     /// Current number of pending messages (diagnostics/tests).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("queued input poisoned").queue.len()
+        self.inner
+            .lock()
+            .expect("queued input poisoned")
+            .queue
+            .len()
     }
 
     /// True when no message is pending.

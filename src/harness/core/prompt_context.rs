@@ -32,10 +32,11 @@ impl Harness {
         // never coordinates them. ACP coworkers never run this harness: their
         // awareness rides a prompt preamble (`agent_coworkers::take_preamble`) at
         // dispatch time instead.
-        self.context_manager.set_coworkers_block(match &self.own_coworker_id {
-            None => super::agent_coworkers::context_block(),
-            Some(own_id) => super::agent_coworkers::peer_block(own_id),
-        });
+        self.context_manager
+            .set_coworkers_block(match &self.own_coworker_id {
+                None => super::agent_coworkers::context_block(),
+                Some(own_id) => super::agent_coworkers::peer_block(own_id),
+            });
         self.header_context.clone()
     }
 }

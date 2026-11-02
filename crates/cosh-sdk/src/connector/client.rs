@@ -6,8 +6,8 @@ use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolD
 use super::provider::{Family, ProviderConfig, get_provider};
 
 use super::claude;
-use super::gemini;
 use super::copilot;
+use super::gemini;
 use super::openai;
 use super::openai_compatible;
 
@@ -320,9 +320,7 @@ impl Connector {
             Family::OpenAi => openai::chat(provider, &self.params, prompt, None, service).await,
             Family::Gemini => gemini::chat(provider, &self.params, prompt, None, service).await,
             Family::Claude => claude::chat(provider, &self.params, prompt, None, service).await,
-            Family::Copilot => {
-                copilot::chat(provider, &self.params, prompt, None, service).await
-            }
+            Family::Copilot => copilot::chat(provider, &self.params, prompt, None, service).await,
         }
     }
 

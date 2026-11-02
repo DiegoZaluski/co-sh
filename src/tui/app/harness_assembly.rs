@@ -27,10 +27,10 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
+use cosh::harness::ContextManagerState;
 use cosh::harness::Harness;
 use cosh::harness::HarnessEvent;
 use cosh::harness::Mode;
-use cosh::harness::ContextManagerState;
 use cosh::harness::queued_input::QueuedInput;
 use cosh_sdk::connector::Connector;
 use cosh_sdk::connector::ToolCallMode;
@@ -115,9 +115,7 @@ pub(crate) struct HarnessAssembly {
 ///
 /// Returns the primary connector plus the REMAINING fallback chain (the
 /// entries after the one that won, for `auto`).
-fn build_connector(
-    a: &HarnessAssembly,
-) -> Result<(Connector, Vec<(String, String)>), String> {
+fn build_connector(a: &HarnessAssembly) -> Result<(Connector, Vec<(String, String)>), String> {
     let apply_cache = |c: Connector| {
         let c = c.with_prompt_cache_ttl_1h(a.anthropic_ttl_1h);
         let c = match &a.cache_key {
@@ -138,8 +136,7 @@ fn build_connector(
         for (i, (fb_provider, fb_model)) in a.fallbacks.iter().enumerate() {
             match Connector::new(fb_provider) {
                 Ok(c) => {
-                    let mut c =
-                        c.with_model(fb_model).with_tool_call_mode(a.tool_call_mode);
+                    let mut c = c.with_model(fb_model).with_tool_call_mode(a.tool_call_mode);
                     // Honor a configured local server URL for this
                     // fallback provider, if any.
                     if let Some(url) = a.local_base_urls.get(fb_provider) {
@@ -151,12 +148,11 @@ fn build_connector(
                     // harness re-resolves per model on every fallback
                     // switch.
                     if let Some(r) = a.reasoning.as_deref()
-                        && let Some(resolved) =
-                            cosh_sdk::connector::resolve_reasoning_effort(
-                                fb_model,
-                                r,
-                                Some("cosh/cache"),
-                            )
+                        && let Some(resolved) = cosh_sdk::connector::resolve_reasoning_effort(
+                            fb_model,
+                            r,
+                            Some("cosh/cache"),
+                        )
                     {
                         c = c.with_reasoning_effort(resolved);
                     }
@@ -192,9 +188,7 @@ fn build_connector(
         let effective = a
             .model
             .as_deref()
-            .and_then(|m| {
-                cosh_sdk::connector::resolve_reasoning_effort(m, r, Some("cosh/cache"))
-            })
+            .and_then(|m| cosh_sdk::connector::resolve_reasoning_effort(m, r, Some("cosh/cache")))
             .unwrap_or_else(|| r.clone());
         with_model.with_reasoning_effort(effective)
     } else {
@@ -407,7 +401,12 @@ pub(crate) async fn run_assembled_loop(
         Some(queue) => {
             harness
                 .run_agent_loop_with_queued_input(
-                    input, event_tx, answer_rx, perm_rx, stop_signal, queue,
+                    input,
+                    event_tx,
+                    answer_rx,
+                    perm_rx,
+                    stop_signal,
+                    queue,
                 )
                 .await;
         }

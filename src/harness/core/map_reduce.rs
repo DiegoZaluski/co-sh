@@ -6,12 +6,12 @@ use std::sync::atomic::Ordering;
 #[cfg(test)]
 use tokio::time::Duration;
 
+#[cfg(test)]
+use super::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER};
 use super::{
     CompactionErr, Harness, MAP_CONCURRENCY, MapRequest, compaction_retry_backoff,
     wait_for_stop_signal,
 };
-#[cfg(test)]
-use super::{INTERRUPTED_MARKER, CONTEXT_WINDOW_MARKER};
 
 pub(super) struct ParallelMapResult {
     ordinal: usize,

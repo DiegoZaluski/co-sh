@@ -644,7 +644,9 @@ pub fn set_coworkers(coworkers: Vec<AgentCoworkerDescriptor>) {
             end: AgentCoworkerTurnEnd::EndTurn,
         });
     }
-    state.ops.retain(|op| live_identities.contains(&op.coworker_id));
+    state
+        .ops
+        .retain(|op| live_identities.contains(&op.coworker_id));
 
     // Parked compact ops of removed coworkers die immediately: the coworker can
     // never be compacted again. Complete them as failures so the
@@ -657,7 +659,14 @@ pub fn set_coworkers(coworkers: Vec<AgentCoworkerDescriptor>) {
         .compacts
         .iter()
         .filter(|op| !live_identities.contains(&op.coworker_id))
-        .map(|op| (op.id.clone(), op.coworker.clone(), op.coworker_id, op.requester))
+        .map(|op| {
+            (
+                op.id.clone(),
+                op.coworker.clone(),
+                op.coworker_id,
+                op.requester,
+            )
+        })
         .collect();
     for (op_id, coworker, coworker_id, requester) in &compact_targets {
         let message = format!("pane '{coworker}' was removed — its context cannot be compacted");
@@ -684,8 +693,12 @@ pub fn set_coworkers(coworkers: Vec<AgentCoworkerDescriptor>) {
     // Identity-keyed maps prune themselves: a dead identity's entries are
     // gone with it; a fresh coworker (recycled label or not) starts with a
     // clean redirect budget and an unannounced awareness.
-    state.announced.retain(|coworker_id, _| live_identities.contains(coworker_id));
-    state.redirects.retain(|coworker_id, _| live_identities.contains(coworker_id));
+    state
+        .announced
+        .retain(|coworker_id, _| live_identities.contains(coworker_id));
+    state
+        .redirects
+        .retain(|coworker_id, _| live_identities.contains(coworker_id));
     state.coworkers = coworkers;
     state.generation += 1;
 }
@@ -876,10 +889,7 @@ pub fn has_queued_request(coworker: &str) -> bool {
 /// from [`enqueue`]'s reply, which is an [`AgentCoworkerReport`] precisely so the
 /// reason cannot be dropped on that path.
 #[must_use]
-pub fn complete_request(
-    coworker: &str,
-    report: AgentCoworkerReport,
-) -> Option<&'static str> {
+pub fn complete_request(coworker: &str, report: AgentCoworkerReport) -> Option<&'static str> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     let request = state.serving.remove(coworker)?;
     let requester = request.requester;
@@ -959,7 +969,10 @@ pub fn fail_serving(coworker: &str, error: String) {
 /// tag so the caller can honor the wake promise.
 #[must_use]
 pub fn cancel_serving(coworker: &str, reason: String) -> Option<&'static str> {
-    complete_request(coworker, AgentCoworkerReport::new(Err(reason), AgentCoworkerTurnEnd::Cancelled))
+    complete_request(
+        coworker,
+        AgentCoworkerReport::new(Err(reason), AgentCoworkerTurnEnd::Cancelled),
+    )
 }
 
 /// Fail ALL of a coworker's outstanding requests — in-flight AND queued — and
@@ -985,7 +998,11 @@ pub fn fail_coworker(coworker: &str, error: String) {
     // The dying coworker's identity (read BEFORE the retain below) prunes the
     // identity-keyed maps: a label that later recycles onto a fresh coworker
     // must not inherit this coworker's redirect budget or announcement.
-    let dying_identity = state.coworkers.iter().find(|p| p.id == coworker).map(|p| p.coworker_id);
+    let dying_identity = state
+        .coworkers
+        .iter()
+        .find(|p| p.id == coworker)
+        .map(|p| p.coworker_id);
     state.coworkers.retain(|p| p.id != coworker);
     state.deliveries.retain(|d| d.coworker != coworker);
     if let Some(coworker_id) = dying_identity {
@@ -1073,19 +1090,17 @@ pub fn has_outstanding_requests(requester: &str) -> bool {
             .values()
             .any(|request| request.requester == requester)
         || state.ops.iter().any(|op| op.requester == requester)
-        || state
-            .compacts
-            .iter()
-            .any(|op| op.requester == requester)
+        || state.compacts.iter().any(|op| op.requester == requester)
 }
 
 /// Fail a wait-mode request (coworker removed / registry reset). No-op when
 /// the id has no outstanding wait.
 fn fail_wait(state: &mut RegistryState, request_id: &str, error: String) {
     if let Some(pending) = state.waits.remove(request_id) {
-        let _ = pending
-            .tx
-            .send(AgentCoworkerReport::new(Err(error), AgentCoworkerTurnEnd::Error));
+        let _ = pending.tx.send(AgentCoworkerReport::new(
+            Err(error),
+            AgentCoworkerTurnEnd::Error,
+        ));
     }
 }
 
@@ -1124,7 +1139,10 @@ pub fn take_ready_deliveries(requester: &str) -> Vec<AgentCoworkerDelivery> {
 /// queue and drop them (the loop would never see those reports).
 /// `None` while the ask is still pending.
 #[must_use]
-pub fn take_ready_worktree_delivery(requester: &str, request_id: &str) -> Option<AgentCoworkerDelivery> {
+pub fn take_ready_worktree_delivery(
+    requester: &str,
+    request_id: &str,
+) -> Option<AgentCoworkerDelivery> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     let index = state.deliveries.iter().position(|delivery| {
         delivery.requester == requester
@@ -1169,10 +1187,7 @@ pub fn record_session_binding(coworker_id: u64, session_id: String) {
 #[must_use]
 pub fn drain_session_bindings() -> Vec<(u64, String)> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
-    let mut facts: Vec<(u64, String)> = state
-        .session_bindings
-        .drain()
-        .collect();
+    let mut facts: Vec<(u64, String)> = state.session_bindings.drain().collect();
     facts.sort_by_key(|(coworker_id, _)| *coworker_id);
     facts
 }
@@ -1312,28 +1327,22 @@ pub fn report_block(
         ),
         // No report text exists at all. Nothing to continue towards, so the
         // guidance is about recoverability, not about `continue`.
-        AgentCoworkerTurnEnd::Incomplete => {
-            "\n\n## The pane produced no report\n\
+        AgentCoworkerTurnEnd::Incomplete => "\n\n## The pane produced no report\n\
              The turn ended without any final text (an empty or exhausted stream, or a safety \
              stop during tool work). If the work is still wanted, re-send the task to the same \
              pane — it holds its context. Do not assume the task completed."
-                .to_string()
-        }
+            .to_string(),
         // Error / user stop: the work was NOT done and `continue` is the
         // wrong recovery (it would re-run against a broken provider, or
         // override a deliberate interrupt).
-        AgentCoworkerTurnEnd::Error => {
-            "\n\n## The pane turn failed\n\
+        AgentCoworkerTurnEnd::Error => "\n\n## The pane turn failed\n\
              The failure above is infrastructure, not a result. `continue` would re-run the \
              same broken path: report the failure to the user, or retry later."
-                .to_string()
-        }
-        AgentCoworkerTurnEnd::Cancelled => {
-            "\n\n## The pane turn was cancelled\n\
+            .to_string(),
+        AgentCoworkerTurnEnd::Cancelled => "\n\n## The pane turn was cancelled\n\
              The USER stopped this coworker's turn. Do not re-send the task automatically; wait \
              for the user's direction."
-                .to_string()
-        }
+            .to_string(),
     };
     format!("{header}{guidance}")
 }
@@ -1611,7 +1620,10 @@ pub fn coworker_is_compacting(coworker_id: u64) -> bool {
 /// also sweep up unrelated parked reports and drop them (the loop would
 /// never see those). `None` while the ask is still pending.
 #[must_use]
-pub fn take_ready_compact_delivery(requester: &str, request_id: &str) -> Option<AgentCoworkerDelivery> {
+pub fn take_ready_compact_delivery(
+    requester: &str,
+    request_id: &str,
+) -> Option<AgentCoworkerDelivery> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     let index = state.deliveries.iter().position(|delivery| {
         delivery.requester == requester
@@ -1692,7 +1704,8 @@ pub fn peer_block(own_id: &str) -> Option<String> {
     use std::fmt::Write as _;
     let coworkers = list_coworkers();
     // Siblings only: the coworker itself is not a peer.
-    let siblings: Vec<&AgentCoworkerDescriptor> = coworkers.iter().filter(|p| p.id != own_id).collect();
+    let siblings: Vec<&AgentCoworkerDescriptor> =
+        coworkers.iter().filter(|p| p.id != own_id).collect();
     if siblings.is_empty() {
         return None;
     }
@@ -1711,7 +1724,11 @@ pub fn peer_block(own_id: &str) -> Option<String> {
             .as_deref()
             .map(|name| format!(", model {name}"))
             .unwrap_or_default();
-        let _ = writeln!(block, "- {} — {}{}{model}", coworker.agent, coworker.id, worktree);
+        let _ = writeln!(
+            block,
+            "- {} — {}{}{model}",
+            coworker.agent, coworker.id, worktree
+        );
     }
     block.push_str(
         "You do NOT coordinate them (no `agents_call` for you): do your own \
@@ -2031,8 +2048,7 @@ mod tests {
         assert_eq!(peek_compact_op().unwrap().id, op2);
         let second = pop_compact_op().expect("the second op");
         complete_compact_op(&second, Err("refused".to_string()));
-        let taken =
-            take_ready_compact_delivery(MANAGER, &op2).expect("the paused tool's poll");
+        let taken = take_ready_compact_delivery(MANAGER, &op2).expect("the paused tool's poll");
         assert_eq!(taken.kind, DeliveryKind::Compact);
         assert_eq!(taken.output.clone().unwrap_err(), "refused");
         assert!(take_ready_deliveries(MAIN).is_empty(), "MAIN unaffected");
@@ -2057,7 +2073,10 @@ mod tests {
             "{acp}"
         );
         assert!(peek_compact_op().is_none(), "refusals park nothing");
-        assert!(enqueue_compact_op("cosh", MAIN).is_ok(), "a cosh pane parks");
+        assert!(
+            enqueue_compact_op("cosh", MAIN).is_ok(),
+            "a cosh pane parks"
+        );
     }
 
     /// A parked compact op is outstanding work for its requester — the
@@ -2104,7 +2123,10 @@ mod tests {
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].request_id, op);
         assert_eq!(deliveries[0].kind, DeliveryKind::Compact);
-        assert_eq!(deliveries[0].coworker_id, 601, "the delivery carries the identity");
+        assert_eq!(
+            deliveries[0].coworker_id, 601,
+            "the delivery carries the identity"
+        );
         assert!(deliveries[0].output.is_err());
         assert!(deliveries[0].output.clone().unwrap_err().contains("cosh"));
     }
@@ -2116,7 +2138,10 @@ mod tests {
     #[test]
     fn a_second_compact_of_a_pane_in_flight_fails_fast() {
         let _g = lock();
-        set_coworkers(vec![coworker("cosh", "cosh", true), coworker("dev", "cosh", true)]);
+        set_coworkers(vec![
+            coworker("cosh", "cosh", true),
+            coworker("dev", "cosh", true),
+        ]);
         let op = enqueue_compact_op("cosh", MAIN).expect("parks");
         let popped = pop_compact_op().expect("the parked op");
         assert_eq!(popped.id, op);
@@ -2218,7 +2243,8 @@ mod tests {
         let queued = enqueue("claude", "waiting its turn", MAIN, ReplyMode::Wait).unwrap();
         let queued_rx = queued.receiver.expect("wait mode carries a receiver");
         assert!(pop_next_request("claude").is_some(), "dispatched");
-        let _background = enqueue("claude", "fire and forget", MAIN, ReplyMode::Background).unwrap();
+        let _background =
+            enqueue("claude", "fire and forget", MAIN, ReplyMode::Background).unwrap();
 
         fail_coworker("claude", "the session switched away".to_string());
 
@@ -2820,7 +2846,8 @@ mod tests {
             coworker("claude", "claude", true),
             coworker("kilo", "kilo", false),
         ]);
-        let second = take_preamble(label_identity("claude")).expect("a changed pane set re-arms the preamble");
+        let second = take_preamble(label_identity("claude"))
+            .expect("a changed pane set re-arms the preamble");
         assert!(second.contains("- kilo — kilo"), "{second}");
         // A coworker gone from the split cannot be announced; re-adding it
         // (generation bump, announce entry pruned) re-arms it from scratch.
@@ -2856,16 +2883,25 @@ mod tests {
     #[test]
     fn the_acp_stop_reasons_map_onto_the_same_vocabulary() {
         // Truncation: there is text, but it may not be the end of the job.
-        assert_eq!(AgentCoworkerTurnEnd::parse("max_tokens"), AgentCoworkerTurnEnd::Partial);
+        assert_eq!(
+            AgentCoworkerTurnEnd::parse("max_tokens"),
+            AgentCoworkerTurnEnd::Partial
+        );
         assert_eq!(
             AgentCoworkerTurnEnd::parse("max_turn_requests"),
             AgentCoworkerTurnEnd::Partial
         );
         // A refusal is a deliberate terminal answer — asking again would
         // re-ask something the agent already declined.
-        assert_eq!(AgentCoworkerTurnEnd::parse("refusal"), AgentCoworkerTurnEnd::EndTurn);
+        assert_eq!(
+            AgentCoworkerTurnEnd::parse("refusal"),
+            AgentCoworkerTurnEnd::EndTurn
+        );
         // The user's interrupt keeps its one meaning across vocabularies.
-        assert_eq!(AgentCoworkerTurnEnd::parse("cancelled"), AgentCoworkerTurnEnd::Cancelled);
+        assert_eq!(
+            AgentCoworkerTurnEnd::parse("cancelled"),
+            AgentCoworkerTurnEnd::Cancelled
+        );
         // A truncated report must never seal as failed: its text already
         // streamed into the timeline and has to dedupe.
         assert!(!AgentCoworkerTurnEnd::parse("max_tokens").is_failure());
@@ -2885,8 +2921,14 @@ mod tests {
         // An unknown spelling must never fabricate a failure: a newer build
         // writing a new variant into a persisted record has to read back as
         // "completed", not as "the pane failed".
-        assert_eq!(AgentCoworkerTurnEnd::parse("something-new"), AgentCoworkerTurnEnd::EndTurn);
-        assert_eq!(AgentCoworkerTurnEnd::parse("end_turn"), AgentCoworkerTurnEnd::EndTurn);
+        assert_eq!(
+            AgentCoworkerTurnEnd::parse("something-new"),
+            AgentCoworkerTurnEnd::EndTurn
+        );
+        assert_eq!(
+            AgentCoworkerTurnEnd::parse("end_turn"),
+            AgentCoworkerTurnEnd::EndTurn
+        );
     }
 
     /// `cancelled` is reserved for the user's stop; a partial report must not
@@ -2921,7 +2963,10 @@ mod tests {
         // The example anchors the failure mode better than any abstraction.
         assert!(block.contains("now I'll edit core.rs"), "{block}");
         // Both wrong reactions are blocked explicitly.
-        assert!(block.contains("do NOT do the pending work yourself"), "{block}");
+        assert!(
+            block.contains("do NOT do the pending work yourself"),
+            "{block}"
+        );
         assert!(block.contains("do NOT start"), "{block}");
     }
 
@@ -2949,28 +2994,26 @@ mod tests {
         let _g = super::tests::lock();
         let coworker = "claude-expiry";
         for expected in 0..MAX_PARTIAL_REDIRECTS {
-            let block =
-                report_block(
-                    coworker,
-                    label_identity(coworker),
-                    "req",
-                    Ok("still narrating"),
-                    AgentCoworkerTurnEnd::Partial,
-                );
-            assert!(
-                block.contains("may not be final") && block.contains("follow-up"),
-                "invitation #{expected} must still invite: {block}"
-            );
-        }
-        // Budget spent: the next partial escalates instead of inviting.
-        let exhausted =
-            report_block(
+            let block = report_block(
                 coworker,
                 label_identity(coworker),
                 "req",
                 Ok("still narrating"),
                 AgentCoworkerTurnEnd::Partial,
             );
+            assert!(
+                block.contains("may not be final") && block.contains("follow-up"),
+                "invitation #{expected} must still invite: {block}"
+            );
+        }
+        // Budget spent: the next partial escalates instead of inviting.
+        let exhausted = report_block(
+            coworker,
+            label_identity(coworker),
+            "req",
+            Ok("still narrating"),
+            AgentCoworkerTurnEnd::Partial,
+        );
         assert!(
             exhausted.contains("Do NOT send it another `continue`"),
             "{exhausted}"
@@ -2983,15 +3026,17 @@ mod tests {
             Ok("done properly"),
             AgentCoworkerTurnEnd::EndTurn,
         );
-        let renewed =
-            report_block(
-                coworker,
-                label_identity(coworker),
-                "req",
-                Ok("narrating again"),
-                AgentCoworkerTurnEnd::Partial,
-            );
-        assert!(renewed.contains("follow-up"), "budget resets on end_turn: {renewed}");
+        let renewed = report_block(
+            coworker,
+            label_identity(coworker),
+            "req",
+            Ok("narrating again"),
+            AgentCoworkerTurnEnd::Partial,
+        );
+        assert!(
+            renewed.contains("follow-up"),
+            "budget resets on end_turn: {renewed}"
+        );
     }
 
     /// Error and user-stop advice must NOT suggest `continue`: one would
@@ -3014,14 +3059,13 @@ mod tests {
         assert!(!err.contains("follow-up with `agents_call`"), "{err}");
         assert!(err.contains("would re-run"), "{err}");
 
-        let stop =
-            report_block(
-                "kilo",
-                label_identity("kilo"),
-                "r",
-                Err("user said stop"),
-                AgentCoworkerTurnEnd::Cancelled,
-            );
+        let stop = report_block(
+            "kilo",
+            label_identity("kilo"),
+            "r",
+            Err("user said stop"),
+            AgentCoworkerTurnEnd::Cancelled,
+        );
         assert!(stop.contains("[failed: cancelled]"), "{stop}");
         assert!(stop.contains("USER stopped"), "{stop}");
 
@@ -3033,7 +3077,10 @@ mod tests {
             AgentCoworkerTurnEnd::Incomplete,
         );
         assert!(empty.contains("produced no report"), "{empty}");
-        assert!(empty.contains("Do not assume the task completed"), "{empty}");
+        assert!(
+            empty.contains("Do not assume the task completed"),
+            "{empty}"
+        );
     }
 
     /// Both delivery paths must produce the SAME text for the same event —
@@ -3196,8 +3243,14 @@ mod tests {
 
         let answer = block_on(async move { rx.await.expect("sender alive") });
         let error = answer.output.expect_err("the replaced pane's wait fails");
-        assert!(error.contains("the pane you addressed as 'claude' is gone"), "{error}");
-        assert!(error.contains("re-address agents_call to one of: [\"claude\"]"), "{error}");
+        assert!(
+            error.contains("the pane you addressed as 'claude' is gone"),
+            "{error}"
+        );
+        assert!(
+            error.contains("re-address agents_call to one of: [\"claude\"]"),
+            "{error}"
+        );
         // The fresh coworker starts CLEAN: no queue to serve, no inherited
         // state. (The fresh coworker's first request would be a NEW enqueue.)
         assert!(!has_queued_request("claude"));
@@ -3267,8 +3320,14 @@ mod tests {
         drop(inflight_302.receiver);
         let queued_302 = enqueue("claude#2", "302 queued", MAIN, ReplyMode::Wait).unwrap();
         drop(queued_302.receiver);
-        assert!(pop_next_request("claude#1").is_some(), "301's first dispatched");
-        assert!(pop_next_request("claude#2").is_some(), "302's first dispatched");
+        assert!(
+            pop_next_request("claude#1").is_some(),
+            "301's first dispatched"
+        );
+        assert!(
+            pop_next_request("claude#2").is_some(),
+            "302's first dispatched"
+        );
         assert!(has_queued_request("claude#1") && has_queued_request("claude#2"));
 
         // THE SWAP: 302 takes `claude#1`, 301 takes `claude#2`. Both legs
@@ -3289,7 +3348,10 @@ mod tests {
         let deliveries = take_ready_deliveries(MAIN);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].coworker_id, 301, "the report is 301's own");
-        assert_eq!(deliveries[0].output.clone().unwrap(), "301 done".to_string());
+        assert_eq!(
+            deliveries[0].output.clone().unwrap(),
+            "301 done".to_string()
+        );
 
         let requester = complete_request(
             "claude#1",
@@ -3299,7 +3361,10 @@ mod tests {
         let deliveries = take_ready_deliveries(MAIN);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].coworker_id, 302, "the report is 302's own");
-        assert_eq!(deliveries[0].output.clone().unwrap(), "302 done".to_string());
+        assert_eq!(
+            deliveries[0].output.clone().unwrap(),
+            "302 done".to_string()
+        );
 
         // The queued half follows too: each new label's queue holds ITS
         // coworker's request, in order, un-crossed.
@@ -3359,7 +3424,10 @@ mod tests {
         let deliveries = take_ready_deliveries(MAIN);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].request_id, op);
-        assert_eq!(deliveries[0].coworker_id, 501, "the delivery carries the identity");
+        assert_eq!(
+            deliveries[0].coworker_id, 501,
+            "the delivery carries the identity"
+        );
         assert!(deliveries[0].output.is_err());
         assert!(deliveries[0].output.clone().unwrap_err().contains("claude"));
     }
@@ -3374,16 +3442,34 @@ mod tests {
         let old_identity = 601u64;
         // Burn the budget on the OLD identity.
         for _ in 0..MAX_PARTIAL_REDIRECTS {
-            let _ = report_block(coworker, old_identity, "req", Ok("narrating"), AgentCoworkerTurnEnd::Partial);
+            let _ = report_block(
+                coworker,
+                old_identity,
+                "req",
+                Ok("narrating"),
+                AgentCoworkerTurnEnd::Partial,
+            );
         }
-        let exhausted = report_block(coworker, old_identity, "req", Ok("narrating"), AgentCoworkerTurnEnd::Partial);
+        let exhausted = report_block(
+            coworker,
+            old_identity,
+            "req",
+            Ok("narrating"),
+            AgentCoworkerTurnEnd::Partial,
+        );
         assert!(
             exhausted.contains("Do NOT send it another `continue`"),
             "budget spent on the old identity: {exhausted}"
         );
         // The coworker is replaced: same label, NEW identity.
         set_coworkers(vec![with_identity(coworker, coworker, 602)]);
-        let fresh = report_block(coworker, 602, "req", Ok("narrating"), AgentCoworkerTurnEnd::Partial);
+        let fresh = report_block(
+            coworker,
+            602,
+            "req",
+            Ok("narrating"),
+            AgentCoworkerTurnEnd::Partial,
+        );
         assert!(
             fresh.contains("follow-up") && fresh.contains("may not be final"),
             "the recycled label starts with a FULL budget: {fresh}"
@@ -3400,7 +3486,13 @@ mod tests {
             with_identity("claude#2", "claude", 702),
         ]);
         // One invitation consumed for 701.
-        let _ = report_block("claude#1", 701, "req", Ok("narrating"), AgentCoworkerTurnEnd::Partial);
+        let _ = report_block(
+            "claude#1",
+            701,
+            "req",
+            Ok("narrating"),
+            AgentCoworkerTurnEnd::Partial,
+        );
         // Remove 702: 701 renumbers to `claude#1`? It is FIRST — its label
         // stays; swap instead: fresh set re-orders 701 second.
         set_coworkers(vec![
@@ -3409,7 +3501,13 @@ mod tests {
         ]);
         // 701's SECOND render still counts from 1 (the invitation, not the
         // escalation): the budget followed the identity, not the label.
-        let second = report_block("claude#2", 701, "req", Ok("narrating"), AgentCoworkerTurnEnd::Partial);
+        let second = report_block(
+            "claude#2",
+            701,
+            "req",
+            Ok("narrating"),
+            AgentCoworkerTurnEnd::Partial,
+        );
         assert!(
             second.contains("follow-up") && !second.contains("Do NOT send"),
             "the budget followed the identity across the renumber: {second}"

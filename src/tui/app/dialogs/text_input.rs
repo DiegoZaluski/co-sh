@@ -359,15 +359,12 @@ impl App {
                     field,
                     selection,
                     ..
-                } => [name, command]
-                    .get(*field)
-                    .copied()
-                    .map(|line| {
-                        selection
-                            .as_ref()
-                            .and_then(|sel| sel.slice_of(*field, line))
-                            .unwrap_or_else(|| line.to_string())
-                    }),
+                } => [name, command].get(*field).copied().map(|line| {
+                    selection
+                        .as_ref()
+                        .and_then(|sel| sel.slice_of(*field, line))
+                        .unwrap_or_else(|| line.to_string())
+                }),
                 DialogType::ProviderForm {
                     name,
                     base_url,
@@ -375,15 +372,12 @@ impl App {
                     field,
                     selection,
                     ..
-                } => [name, base_url, family]
-                    .get(*field)
-                    .copied()
-                    .map(|line| {
-                        selection
-                            .as_ref()
-                            .and_then(|sel| sel.slice_of(*field, line))
-                            .unwrap_or_else(|| line.to_string())
-                    }),
+                } => [name, base_url, family].get(*field).copied().map(|line| {
+                    selection
+                        .as_ref()
+                        .and_then(|sel| sel.slice_of(*field, line))
+                        .unwrap_or_else(|| line.to_string())
+                }),
                 _ => None,
             },
             None => None,
@@ -457,11 +451,7 @@ impl App {
                     form_panel_hit_field(area, demand, &values, x, y)
                         .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
                 }
-                DialogType::AcpForm {
-                    name,
-                    command,
-                    ..
-                } => {
+                DialogType::AcpForm { name, command, .. } => {
                     let values = [name.as_str(), command.as_str()];
                     let demand = dialog_panel_demand(Some(&d.dialog_type));
                     form_panel_hit_field(area, demand, &values, x, y)
@@ -531,12 +521,9 @@ impl App {
     /// follows the drag end. Returns false when no selection is active.
     pub(in crate::app) fn extend_form_selection_at(&mut self, x: u16, y: u16) -> bool {
         let area = self.terminal_size();
-        let demand = self
-            .dialog
-            .current()
-            .map_or(0, |d| {
-                crate::ui::dialogs::dialog_panel_demand(Some(&d.dialog_type))
-            });
+        let demand = self.dialog.current().map_or(0, |d| {
+            crate::ui::dialogs::dialog_panel_demand(Some(&d.dialog_type))
+        });
         let target: Option<(usize, usize)> = match self.dialog.current() {
             Some(d) => match &d.dialog_type {
                 DialogType::HookInput {
@@ -700,14 +687,11 @@ impl App {
                     field,
                     selection,
                     ..
-                } => [name, command]
-                    .get(*field)
-                    .copied()
-                    .and_then(|line| {
-                        selection
-                            .as_ref()
-                            .and_then(|sel| sel.slice_of(*field, line))
-                    }),
+                } => [name, command].get(*field).copied().and_then(|line| {
+                    selection
+                        .as_ref()
+                        .and_then(|sel| sel.slice_of(*field, line))
+                }),
                 DialogType::ProviderForm {
                     name,
                     base_url,
@@ -926,7 +910,13 @@ impl App {
         }
         let entries = prospective
             .into_iter()
-            .map(|provider| (provider.name, provider.base_url, provider.family.sdk_family()))
+            .map(|provider| {
+                (
+                    provider.name,
+                    provider.base_url,
+                    provider.family.sdk_family(),
+                )
+            })
             .collect();
         if let Err(error) = cosh_sdk::connector::register_custom_providers(entries) {
             self.toast_form_error("Provider not saved", error);
@@ -962,7 +952,9 @@ impl App {
                     None,
                     String::new(),
                     String::new(),
-                    cosh::setup::CustomProviderFamily::default().label().to_string(),
+                    cosh::setup::CustomProviderFamily::default()
+                        .label()
+                        .to_string(),
                 ),
                 |entry| {
                     (
@@ -1029,9 +1021,7 @@ impl App {
             .iter()
             .map(|agent| (agent.name.clone(), agent.command.clone()))
             .collect();
-        if let Err(error) =
-            cosh_tools::subagent::acp::register_custom_agents(&prospective_pairs)
-        {
+        if let Err(error) = cosh_tools::subagent::acp::register_custom_agents(&prospective_pairs) {
             self.toast_form_error("Agent not saved", error);
             return false;
         }
@@ -1053,18 +1043,16 @@ impl App {
     /// Open the ACP harness registration box: blank for creation, prefilled
     /// with the current values when editing the entry at `index`.
     pub(in crate::app) fn open_acp_form(&mut self, index: Option<usize>) {
-        let (editing, name, command) = index
-            .and_then(|i| self.setup.acp_agents.get(i))
-            .map_or(
-                (None, String::new(), String::new()),
-                |entry| {
-                    (
-                        Some(index.expect("entry exists implies index")),
-                        entry.name.clone(),
-                        entry.command.clone(),
-                    )
-                },
-            );
+        let (editing, name, command) = index.and_then(|i| self.setup.acp_agents.get(i)).map_or(
+            (None, String::new(), String::new()),
+            |entry| {
+                (
+                    Some(index.expect("entry exists implies index")),
+                    entry.name.clone(),
+                    entry.command.clone(),
+                )
+            },
+        );
         self.dialog.show(DialogType::AcpForm {
             editing,
             name,
@@ -1375,9 +1363,7 @@ fn form_extend_byte(
     x: u16,
     y: u16,
 ) -> usize {
-    use crate::ui::dialogs::{
-        byte_at_char, form_field_geometries, form_panel_metrics,
-    };
+    use crate::ui::dialogs::{byte_at_char, form_field_geometries, form_panel_metrics};
     let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, values);
     let g = &form_field_geometries(dialog_y, values, cols)[field];
     let value = values[field];

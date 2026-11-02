@@ -311,7 +311,11 @@ mod tests {
             // test below.
             let is_black = palette.primary == Rgb::from_parts(0, 0, 0);
             if !matches!(agent.name, "goose" | "cline") {
-                assert!(!is_black, "{} must not resolve to pure black by accident", agent.name);
+                assert!(
+                    !is_black,
+                    "{} must not resolve to pure black by accident",
+                    agent.name
+                );
             }
         }
     }
@@ -443,7 +447,11 @@ mod tests {
         assert_eq!(start, palette.primary);
         let end = palette.sample(1.0);
         assert_eq!(end, palette.quaternary.expect("gemini quaternary"));
-        assert_eq!(end, palette.tertiary.expect("gemini tertiary"), "final i matches n");
+        assert_eq!(
+            end,
+            palette.tertiary.expect("gemini tertiary"),
+            "final i matches n"
+        );
         // A midpoint between the first two stops is BETWEEN their channels.
         let blue = palette.primary;
         let violet = palette.secondary.expect("gemini secondary");

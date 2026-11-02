@@ -152,7 +152,8 @@ fn backfill_from_transcript(session: &crate::types::Session) -> Vec<SubagentEven
                                 text: cosh_tools::subagent::internal::output_tail(tail),
                                 skipped: 0,
                                 diff: cosh_tools::subagent::internal::diff_summary_from_result(
-                                    tool.tool.clone(), tail,
+                                    tool.tool.clone(),
+                                    tail,
                                 ),
                             });
                             // ONE id for the call AND its update: a fallback
@@ -233,7 +234,9 @@ impl App {
         if let Some(session) = session {
             let running = self.state.status == crate::types::SessionStatus::Working;
             for event in backfill_from_transcript(&session) {
-                self.state.right_panel.sync_main_mirror_event(&event, running);
+                self.state
+                    .right_panel
+                    .sync_main_mirror_event(&event, running);
             }
         }
         // The backfilled transcript IS the newest content: pin the viewport
@@ -268,10 +271,7 @@ impl App {
             return;
         }
         for sub in mirror_events(&mut self.main_mirror_bridge, event) {
-            let applied = self
-                .state
-                .right_panel
-                .sync_main_mirror_event(&sub, running);
+            let applied = self.state.right_panel.sync_main_mirror_event(&sub, running);
             if applied && !self.state.right_panel.is_scrolled_up() {
                 self.state.right_panel.scroll_to_bottom();
             }
@@ -297,7 +297,9 @@ impl App {
             return;
         }
         self.main_mirror_bridge = MirrorBridge::default();
-        self.state.right_panel.set_main_mirror_input_echo(Some(input));
+        self.state
+            .right_panel
+            .set_main_mirror_input_echo(Some(input));
         self.state.right_panel.scroll_to_bottom();
     }
 
@@ -311,7 +313,9 @@ impl App {
         }
         self.main_mirror_bridge = MirrorBridge::default();
         let applied = self.state.right_panel.sync_main_mirror_event(
-            &SubagentEvent::Message { text: text.to_string() },
+            &SubagentEvent::Message {
+                text: text.to_string(),
+            },
             false,
         );
         if applied && !self.state.right_panel.is_scrolled_up() {
@@ -329,4 +333,3 @@ impl App {
         self.state.right_panel.finish_main_mirror(failed);
     }
 }
-

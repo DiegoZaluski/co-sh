@@ -9,9 +9,7 @@ use cosh_sdk::connector::ChatMessage;
 use cosh_sdk::connector::ConnectorError;
 use cosh_sdk::extract_action::{ExtractAction, NativeToolCall, StreamAction, ToolCallData};
 
-use super::{
-    Harness, INTERRUPTED_MARKER, StreamEvent, ToolCallMode, CONTEXT_WINDOW_MARKER,
-};
+use super::{CONTEXT_WINDOW_MARKER, Harness, INTERRUPTED_MARKER, StreamEvent, ToolCallMode};
 
 impl Harness {
     /// Stream a chat completion using a proper messages array (native tool-call
@@ -70,9 +68,8 @@ impl Harness {
                         for chunk in self.mock_reasoning_queue.pop_front().unwrap_or_default() {
                             self.attempt_reasoning.push_str(&chunk);
                             if let Some(ref rtx) = self.reasoning_tx {
-                                let _ = rtx.send(super::events::HarnessEvent::Reasoning {
-                                    text: chunk,
-                                });
+                                let _ = rtx
+                                    .send(super::events::HarnessEvent::Reasoning { text: chunk });
                             }
                         }
                     }

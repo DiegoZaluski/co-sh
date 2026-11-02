@@ -18,8 +18,11 @@ async fn telemetry_toggle_fires_restart_toast() {
     // used to land at the end deterministically.
     let before = app.setup.telemetry;
     app.settings_view.select_prev(1, &app.setup);
-    app.process_key_event(super::mod_key(KeyCode::Enter, crossterm::event::KeyModifiers::NONE))
-        .unwrap();
+    app.process_key_event(super::mod_key(
+        KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ))
+    .unwrap();
 
     assert_ne!(
         app.setup.telemetry, before,

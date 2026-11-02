@@ -129,9 +129,8 @@ pub(super) fn part_content_stamp(part: &Part) -> u64 {
         Part::Install(p) => {
             let mut h = p.bytes_done;
             h = h.wrapping_mul(31).wrapping_add(p.bytes_total);
-            h.wrapping_mul(31).wrapping_add(
-                u64::from(p.elapsed_ms.is_some()) * 2 + u64::from(p.failed.is_some()),
-            )
+            h.wrapping_mul(31)
+                .wrapping_add(u64::from(p.elapsed_ms.is_some()) * 2 + u64::from(p.failed.is_some()))
         }
         Part::File(_) => 0,
     }

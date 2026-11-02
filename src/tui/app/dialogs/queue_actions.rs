@@ -98,11 +98,13 @@ impl App {
         // The chain auto-starts the Next head in exactly these states: a
         // live loop hands it over at closure (Working), an idle chain fires
         // it right away (Idle, including the deferred start).
-        matches!(self.state.status, SessionStatus::Idle | SessionStatus::Working)
-            && self
-                .active_loop_session_id
-                .as_deref()
-                .is_none_or(|owner| owner == id)
+        matches!(
+            self.state.status,
+            SessionStatus::Idle | SessionStatus::Working
+        ) && self
+            .active_loop_session_id
+            .as_deref()
+            .is_none_or(|owner| owner == id)
     }
 
     /// Execute the picked Queue Actions entry: 0 = Edit, 1 = Delete,
@@ -128,8 +130,7 @@ impl App {
         }
         // Snapshot the loop-ownership check BEFORE the mutation block: the
         // Edit branch moves `owner` into the requeue hint.
-        let loop_owner_matches =
-            self.active_loop_session_id.as_deref() == Some(owner.as_str());
+        let loop_owner_matches = self.active_loop_session_id.as_deref() == Some(owner.as_str());
         let text = {
             let Some(queues) = self.state.current_pending_queues_mut() else {
                 return;

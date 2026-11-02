@@ -4,9 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{
-    Harness, INSTRUCTIONS_SUBAGENT, Mode, SUBAGENT_BLOCKED_TOOLS, background,
-};
+use super::{Harness, INSTRUCTIONS_SUBAGENT, Mode, SUBAGENT_BLOCKED_TOOLS, background};
 
 impl Harness {
     /// Run the INTERNAL sub-agent path of the merged `subagent_call` tool:

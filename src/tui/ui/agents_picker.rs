@@ -161,15 +161,17 @@ impl AgentsPicker {
             selected: false,
             instances: String::new(),
         }];
-        entries.extend(cosh_tools::subagent::acp::all_agent_names().into_iter().map(
-            |name| AgentEntry {
-                name: name.to_string(),
-                installed: installed.contains(&name)
-                    || cosh_tools::subagent::acp::custom_agent_installed(name),
-                selected: false,
-                instances: String::new(),
-            },
-        ));
+        entries.extend(
+            cosh_tools::subagent::acp::all_agent_names()
+                .into_iter()
+                .map(|name| AgentEntry {
+                    name: name.to_string(),
+                    installed: installed.contains(&name)
+                        || cosh_tools::subagent::acp::custom_agent_installed(name),
+                    selected: false,
+                    instances: String::new(),
+                }),
+        );
         Self {
             visible: false,
             entries,
@@ -438,15 +440,11 @@ impl AgentsPicker {
                 // reaches this arm) — a fat-finger overshoot release must
                 // not act as a dismiss click, the free-gateway dialog's
                 // drag-ownership rule.
-                MouseEventType::Down
-                    if !inside_box && mouse.button == MouseButton::Left =>
-                {
+                MouseEventType::Down if !inside_box && mouse.button == MouseButton::Left => {
                     self.close();
                     AgentsPickerAction::Cancelled
                 }
-                MouseEventType::Up
-                    if !inside_box && mouse.button == MouseButton::Left =>
-                {
+                MouseEventType::Up if !inside_box && mouse.button == MouseButton::Left => {
                     // Release of a press that started inside the box:
                     // inert, the picker stays open with its marks.
                     AgentsPickerAction::Consumed
@@ -592,7 +590,10 @@ impl AgentsPicker {
             header_x,
             box_area.y,
             box_area.width.saturating_sub(4),
-            Style::default().fg(text).bg(fill).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(text)
+                .bg(fill)
+                .add_modifier(Modifier::BOLD),
         );
         let esc_hint = "esc";
         draw_text_line_compact(
@@ -708,7 +709,10 @@ impl AgentsPicker {
             let name_style = if !entry.installed {
                 Style::default().fg(muted).bg(row_bg)
             } else if is_cursor {
-                Style::default().fg(fg).add_modifier(Modifier::BOLD).bg(row_bg)
+                Style::default()
+                    .fg(fg)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(row_bg)
             } else {
                 Style::default().fg(text).bg(row_bg)
             };
@@ -795,7 +799,12 @@ mod tests {
             selected: false,
             instances: String::new(),
         };
-        picker.entries = vec![entry("cosh"), entry("gemini"), entry("goose"), entry("kilo")];
+        picker.entries = vec![
+            entry("cosh"),
+            entry("gemini"),
+            entry("goose"),
+            entry("kilo"),
+        ];
         picker.open();
         picker
     }
@@ -815,10 +824,16 @@ mod tests {
         // order, not in the order the user happened to toggle.
         picker.handle_key(KeyCode::Down, KeyModifiers::NONE);
         picker.handle_key(KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE), AgentsPickerAction::Toggled);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE),
+            AgentsPickerAction::Toggled
+        );
         picker.handle_key(KeyCode::Up, KeyModifiers::NONE);
         picker.handle_key(KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE), AgentsPickerAction::Toggled);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE),
+            AgentsPickerAction::Toggled
+        );
 
         assert_eq!(picker.selected_names()[0], "cosh");
         assert_eq!(picker.selected_names()[1], picker.entries[2].name);
@@ -960,10 +975,7 @@ mod tests {
         let mut zero_picker = picker();
         zero_picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
         zero_picker.handle_key(KeyCode::Char('0'), KeyModifiers::NONE);
-        assert_eq!(
-            zero_picker.entries[0].parsed_instances(),
-            DEFAULT_INSTANCES
-        );
+        assert_eq!(zero_picker.entries[0].parsed_instances(), DEFAULT_INSTANCES);
     }
 
     #[test]
@@ -1022,7 +1034,10 @@ mod tests {
         picker.handle_key(KeyCode::Down, KeyModifiers::NONE);
         picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
 
-        assert_eq!(picker.handle_key(KeyCode::Esc, KeyModifiers::NONE), AgentsPickerAction::Cancelled);
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+            AgentsPickerAction::Cancelled
+        );
         assert!(!picker.visible);
         assert!(picker.selected_names().is_empty());
     }
@@ -1066,14 +1081,23 @@ mod tests {
 
         // Empty listing stays inert.
         picker.entries.clear();
-        assert_eq!(picker.handle_key(KeyCode::Down, KeyModifiers::NONE), AgentsPickerAction::Consumed);
-        assert_eq!(picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE), AgentsPickerAction::Consumed);
+        assert_eq!(
+            picker.handle_key(KeyCode::Down, KeyModifiers::NONE),
+            AgentsPickerAction::Consumed
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE),
+            AgentsPickerAction::Consumed
+        );
     }
 
     #[test]
     fn events_when_hidden_are_passed_through() {
         let mut picker = AgentsPicker::new();
-        assert_eq!(picker.handle_key(KeyCode::Esc, KeyModifiers::NONE), AgentsPickerAction::None);
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+            AgentsPickerAction::None
+        );
         assert_eq!(
             picker.handle_mouse(&mouse(MouseEventType::Up, 0, 0), picker_area()),
             AgentsPickerAction::None
@@ -1112,13 +1136,22 @@ mod tests {
         let first_row: String = (0..area.width)
             .filter_map(|x| buf.cell((x, 15)).map(|c| c.symbol().to_string()))
             .collect();
-        assert!(first_row.contains('●'), "marked ● on cursor row: {first_row}");
-        assert!(first_row.contains("cosh"), "agent name on cursor row: {first_row}");
+        assert!(
+            first_row.contains('●'),
+            "marked ● on cursor row: {first_row}"
+        );
+        assert!(
+            first_row.contains("cosh"),
+            "agent name on cursor row: {first_row}"
+        );
 
         let second_row: String = (0..area.width)
             .filter_map(|x| buf.cell((x, 16)).map(|c| c.symbol().to_string()))
             .collect();
-        assert!(second_row.contains('○'), "unmarked ○ on the next row: {second_row}");
+        assert!(
+            second_row.contains('○'),
+            "unmarked ○ on the next row: {second_row}"
+        );
     }
 
     #[test]
@@ -1126,16 +1159,21 @@ mod tests {
         let picker = AgentsPicker::new();
         assert_eq!(picker.entries[0].name, "cosh");
         assert!(picker.entries[0].installed);
-        assert!(picker.entries[1..]
-            .iter()
-            .enumerate()
-            .all(|(i, entry)| entry.name == cosh_tools::subagent::acp::ACP_AGENTS[i].name));
+        assert!(
+            picker.entries[1..]
+                .iter()
+                .enumerate()
+                .all(|(i, entry)| entry.name == cosh_tools::subagent::acp::ACP_AGENTS[i].name)
+        );
     }
 
     #[test]
     fn typing_edits_the_search_filter_and_narrows_the_list() {
         let mut picker = small_picker();
-        assert_eq!(picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE), AgentsPickerAction::Consumed);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE),
+            AgentsPickerAction::Consumed
+        );
         assert_eq!(picker.filter, "g");
         // gemini + goose match by name; cosh and kilo do not.
         let filtered = picker.filtered_indices();
@@ -1161,16 +1199,22 @@ mod tests {
         picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
         picker.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
 
-        assert!(picker.entries
-            .iter()
-            .find(|entry| entry.name == "goose")
-            .is_some_and(|entry| entry.selected));
+        assert!(
+            picker
+                .entries
+                .iter()
+                .find(|entry| entry.name == "goose")
+                .is_some_and(|entry| entry.selected)
+        );
     }
 
     #[test]
     fn space_toggles_instead_of_typing_into_the_search() {
         let mut picker = small_picker();
-        assert_eq!(picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE), AgentsPickerAction::Toggled);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE),
+            AgentsPickerAction::Toggled
+        );
         assert!(picker.filter.is_empty());
         assert!(picker.entries[0].selected);
     }
@@ -1190,7 +1234,10 @@ mod tests {
         // 4 entries → 4 visible rows → height 8 (rows + title + search +
         // gap + padding).
         assert_eq!(full.height, 8);
-        assert_eq!(full.width, 50, "models width clamp: 50 when the terminal allows");
+        assert_eq!(
+            full.width, 50,
+            "models width clamp: 50 when the terminal allows"
+        );
 
         // Narrow the listing and the box shrinks with it.
         picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
@@ -1356,6 +1403,9 @@ mod tests {
         let list_top: String = (0..area.width)
             .filter_map(|x| buf.cell((x, 20)).map(|c| c.symbol().to_string()))
             .collect();
-        assert!(list_top.contains("No matching agents"), "empty message row: {list_top}");
+        assert!(
+            list_top.contains("No matching agents"),
+            "empty message row: {list_top}"
+        );
     }
 }

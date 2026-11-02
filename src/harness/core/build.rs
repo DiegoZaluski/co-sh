@@ -13,7 +13,9 @@ use crate::harness::tools::CoshTools;
 use super::{
     ContextManager, CorrectionMemory, Harness, MAX_CONTEXT_TOKENS, Mode, PrefixCacheProbe,
     PromptSystem, SUBAGENT_INTERNAL_NOTE, build_lsp, default_harness_tools,
-    limits::{CHECKUP_VETO_BUDGET, COWORKER_RESUME_BUDGET, STOP_NUDGE_BUDGET, TOOL_LOOP_RECOVERY_SHARE},
+    limits::{
+        CHECKUP_VETO_BUDGET, COWORKER_RESUME_BUDGET, STOP_NUDGE_BUDGET, TOOL_LOOP_RECOVERY_SHARE,
+    },
 };
 
 impl Harness {
@@ -122,7 +124,9 @@ impl Harness {
         // context block, no interpolated noise for something that does
         // not exist.
         if super::agent_coworkers::has_coworkers() {
-            harness.harness_tools.push(super::agent_coworkers::agents_call_tool());
+            harness
+                .harness_tools
+                .push(super::agent_coworkers::agents_call_tool());
             harness
                 .harness_tools
                 .push(super::agent_coworkers::agents_worktree_tool());

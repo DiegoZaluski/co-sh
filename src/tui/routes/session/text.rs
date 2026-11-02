@@ -50,7 +50,14 @@ pub(super) fn blit_cell_rows(
 
 /// Draws the expand/collapse hint styled as a button: highlighted with the
 /// theme primary color as a marker-like background so it reads as clickable.
-pub(super) fn draw_hint_button(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, theme: &Theme) {
+pub(super) fn draw_hint_button(
+    buf: &mut Buffer,
+    text: &str,
+    x: u16,
+    y: u16,
+    max_w: u16,
+    theme: &Theme,
+) {
     let style = Style::default()
         .fg(rgba_color(theme.background))
         .bg(rgba_color(theme.primary));

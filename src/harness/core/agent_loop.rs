@@ -10,15 +10,15 @@ use tokio::time::Duration;
 use cosh_sdk::connector::{Connector, resolve_reasoning_effort};
 
 #[cfg(not(test))]
-use super::discovered_context_window;
-#[cfg(not(test))]
 use super::context::ContextManager;
+#[cfg(not(test))]
+use super::discovered_context_window;
+use super::limits::LOOP_DETECTION_MAX_REPEATS;
 use super::{
-    CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, ITERATION_RENEWALS,
-    MAX_TOOL_RETRIES, Harness, LOOP_DETECTION_WINDOW_SIZE, PrefixCacheProbe, RunOutcome,
+    CONTEXT_WINDOW_MARKER, Harness, INTERRUPTED_MARKER, ITERATION_RENEWALS,
+    LOOP_DETECTION_WINDOW_SIZE, MAX_ITERATIONS, MAX_TOOL_RETRIES, PrefixCacheProbe, RunOutcome,
     StreamEvent, background,
 };
-use super::limits::LOOP_DETECTION_MAX_REPEATS;
 
 /// What ended a pre-Done busy-guard wait (see `Harness::wait_for_outstanding`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,9 +323,11 @@ impl Harness {
                 // `effective_context_window`). The RAW window is kept above
                 // in `discovered_window`, where it still drives the
                 // hierarchical MapReduce contingency.
-                self.context_manager.set_max_tokens(
-                    ContextManager::resolve_window(window, self.effective_context),
-                );
+                self.context_manager
+                    .set_max_tokens(ContextManager::resolve_window(
+                        window,
+                        self.effective_context,
+                    ));
             }
         }
 
@@ -577,13 +579,12 @@ impl Harness {
                 // Exact-prefix cache probe: fingerprint this request and
                 // classify the cache outcome against the previous one from
                 // the same model (measured divergence, never inferred).
-                self.prefix_cache_probe.record(
-                    PrefixCacheProbe::fingerprint(
+                self.prefix_cache_probe
+                    .record(PrefixCacheProbe::fingerprint(
                         self.connector.model().unwrap_or("?"),
                         &system_context,
                         &messages,
-                    ),
-                );
+                    ));
                 let attempt = self
                     .stream_chat_with_messages(&system_context, &messages, |event| {
                         match event {
@@ -757,7 +758,10 @@ impl Harness {
                                     // (the raw window stays in
                                     // `discovered_window` for the split).
                                     self.context_manager.set_max_tokens(
-                                        ContextManager::resolve_window(window, self.effective_context),
+                                        ContextManager::resolve_window(
+                                            window,
+                                            self.effective_context,
+                                        ),
                                     );
                                 }
                             }
@@ -1990,9 +1994,11 @@ impl Harness {
                     // continuation uses) under its own per-loop budget
                     // (`COWORKER_RESUME_BUDGET`), and refuses when the USER
                     // stopped the turn — the one legitimate early end.
-                    if let Some(steering) =
-                        self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::EmptyStop, None)
-                    {
+                    if let Some(steering) = self.resume_pane_turn(
+                        &stop_signal,
+                        super::guards::ResumeCause::EmptyStop,
+                        None,
+                    ) {
                         current_input = steering;
                         continue;
                     }
@@ -2149,9 +2155,11 @@ impl Harness {
                             open_count,
                             self.coworker_resumes_left - 1
                         );
-                        if let Some(steering) =
-                            self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::PendingTodos, Some(listed))
-                        {
+                        if let Some(steering) = self.resume_pane_turn(
+                            &stop_signal,
+                            super::guards::ResumeCause::PendingTodos,
+                            Some(listed),
+                        ) {
                             current_input = steering;
                             continue;
                         }
@@ -2164,7 +2172,9 @@ impl Harness {
                 // the report (same nesting rule as the background
                 // sub-agents below). Wait for the completions; Esc
                 // interrupts the wait and ends the turn normally.
-                if !self.nested && super::agent_coworkers::has_outstanding_requests(self.coworkers_requester) {
+                if !self.nested
+                    && super::agent_coworkers::has_outstanding_requests(self.coworkers_requester)
+                {
                     log::debug!("run_agent_loop WAITING for /agents pane reports before Done");
                     // Tell the TUI the loop is only waiting: a prompt
                     // submitted now is meant for IMMEDIATE delivery, and the
@@ -2212,9 +2222,12 @@ impl Harness {
                     log::debug!(
                         "run_agent_loop WAITING for background sub-agent tasks before Done"
                     );
-                    let exit =
-                        Self::wait_for_outstanding(&stop_signal, &queued_input, background::has_running_tasks)
-                            .await;
+                    let exit = Self::wait_for_outstanding(
+                        &stop_signal,
+                        &queued_input,
+                        background::has_running_tasks,
+                    )
+                    .await;
                     // Esc during the wait ends the turn normally: no
                     // injection, fall through to the standard Done path
                     // below (never break without emitting Done — the TUI
@@ -2241,8 +2254,7 @@ impl Harness {
                     // only when it really produced notes (a task can finish
                     // with nothing to report).
                     if exit == WaitExit::MessagePending
-                        || (exit == WaitExit::Resolved
-                            && self.inject_completion_notes(&tx, notes))
+                        || (exit == WaitExit::Resolved && self.inject_completion_notes(&tx, notes))
                     {
                         // The injected completions (or the waiting message)
                         // are the new input; the stale steering text must not

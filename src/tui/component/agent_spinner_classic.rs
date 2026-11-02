@@ -215,9 +215,7 @@ impl AgentSpinnerClassic {
                 .map(|f| f.chars().count())
                 .max()
                 .unwrap_or(0);
-            let glyph_x = x
-                .saturating_add(2)
-                .saturating_add(self.label_width as u16);
+            let glyph_x = x.saturating_add(2).saturating_add(self.label_width as u16);
             let glyph_style = Style::default().fg(rgba_color(self.label_color));
             let mut written = 0usize;
             for (i, ch) in glyph_text.chars().enumerate() {
@@ -262,7 +260,10 @@ mod tests {
         for _ in 0..(TICKS_PER_FRAME * SPINNER_FRAMES.len() as u32) {
             spinner.advance();
         }
-        assert_eq!(spinner.wheel_index(), (SPINNER_FRAMES.len() + 1) % SPINNER_FRAMES.len());
+        assert_eq!(
+            spinner.wheel_index(),
+            (SPINNER_FRAMES.len() + 1) % SPINNER_FRAMES.len()
+        );
     }
 
     #[test]
@@ -315,11 +316,17 @@ mod tests {
         }
 
         spinner.set_activity(AgentActivity::Searching);
-        assert_eq!(spinner.status_frame(), super::super::agent_spinner::SEARCHING_FRAMES[0]);
+        assert_eq!(
+            spinner.status_frame(),
+            super::super::agent_spinner::SEARCHING_FRAMES[0]
+        );
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         spinner.render(&mut buf, 0, 0);
         let ex = spinner.status_x_for_test();
-        assert_eq!(buf[(ex, 0)].symbol(), super::super::agent_spinner::SEARCHING_FRAMES[0]);
+        assert_eq!(
+            buf[(ex, 0)].symbol(),
+            super::super::agent_spinner::SEARCHING_FRAMES[0]
+        );
     }
 
     #[test]

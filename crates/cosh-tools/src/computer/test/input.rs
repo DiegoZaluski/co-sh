@@ -299,7 +299,9 @@ mod keyboard_tests {
 
 #[cfg(test)]
 mod hold_release_validation_tests {
-    use crate::computer::act::{chain_needs_sim, validate_step as act_validate, validate_chain as act_chain};
+    use crate::computer::act::{
+        chain_needs_sim, validate_chain as act_chain, validate_step as act_validate,
+    };
     use crate::computer::control::validate_chain;
     use crate::computer::types::{ComputerAct, ComputerControl};
 
@@ -318,7 +320,11 @@ mod hold_release_validation_tests {
         assert!(validate_chain(&hold_only, 8).is_ok());
 
         for step in [
-            ComputerControl { hold: Some(vec!["ctrl".into()]), wait: Some(5), ..ctrl_step() },
+            ComputerControl {
+                hold: Some(vec!["ctrl".into()]),
+                wait: Some(5),
+                ..ctrl_step()
+            },
             ComputerControl {
                 hold: Some(vec!["ctrl".into()]),
                 key: Some("a".into()),
@@ -337,7 +343,10 @@ mod hold_release_validation_tests {
             },
         ] {
             let err = validate_chain(&step, 8).expect_err("hold stays standalone");
-            assert!(err.contains("standalone") || err.contains("not both"), "{err}");
+            assert!(
+                err.contains("standalone") || err.contains("not both"),
+                "{err}"
+            );
         }
     }
 
@@ -360,7 +369,10 @@ mod hold_release_validation_tests {
             release: Some(vec!["hyper".into()]),
             ..ctrl_step()
         };
-        assert!(validate_chain(&unknown, 8).is_err(), "unknown key name must fail");
+        assert!(
+            validate_chain(&unknown, 8).is_err(),
+            "unknown key name must fail"
+        );
     }
 
     #[test]
@@ -421,12 +433,10 @@ mod hold_release_validation_tests {
 /// deserializer as `Vec<String>`.
 #[cfg(test)]
 mod hold_release_extraction_tests {
-    use cosh_sdk::extract_action::{
-        ExtractAction, NativeToolCall, StreamAction, ToolSchema,
-    };
+    use cosh_sdk::extract_action::{ExtractAction, NativeToolCall, StreamAction, ToolSchema};
 
-    use crate::computer::types::ComputerControl;
     use crate::computer::Computer;
+    use crate::computer::types::ComputerControl;
 
     fn schema(description: &serde_json::Value) -> ToolSchema {
         ToolSchema {

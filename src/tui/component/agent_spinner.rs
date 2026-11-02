@@ -35,8 +35,8 @@ const PRERENDERED_FRAMES: usize = 10;
 /// Characters used in the scrambled animation: the Elder Futhark runes
 /// plus solid block terminals in the same carved style.
 const AVAILABLE_RUNES: &[char] = &[
-    'ᚠ', 'ᚢ', 'ᚦ', 'ᚨ', 'ᚱ', 'ᚲ', 'ᚷ', 'ᚹ', 'ᚺ', 'ᚾ', 'ᛁ', 'ᛃ', 'ᛇ', 'ᛈ', 'ᛉ', 'ᛊ', 'ᛏ',
-    'ᛒ', 'ᛖ', 'ᛗ', 'ᛚ', 'ᛜ', 'ᛞ', 'ᛟ', '▮', '▰', '◼',
+    'ᚠ', 'ᚢ', 'ᚦ', 'ᚨ', 'ᚱ', 'ᚲ', 'ᚷ', 'ᚹ', 'ᚺ', 'ᚾ', 'ᛁ', 'ᛃ', 'ᛇ', 'ᛈ', 'ᛉ', 'ᛊ', 'ᛏ', 'ᛒ', 'ᛖ',
+    'ᛗ', 'ᛚ', 'ᛜ', 'ᛞ', 'ᛟ', '▮', '▰', '◼',
 ];
 
 /// Status glyph sequences: the animation shown after the status text. Each
@@ -268,8 +268,7 @@ impl AgentSpinner {
     /// prompt's shared mode-colour mapping; the whole scramble row takes it
     /// as a solid tone.
     pub fn set_mode_color(&mut self, color: RGBA) {
-        self.gradient_colors =
-            make_gradient_ramp(color, color, self.cycling_char_width);
+        self.gradient_colors = make_gradient_ramp(color, color, self.cycling_char_width);
     }
 
     /// Update the theme colours (gradient and label colour) without

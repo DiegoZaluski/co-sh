@@ -257,8 +257,8 @@ impl App {
                         .enumerate()
                         .filter_map(|(i, p)| {
                             let id = split.pane_registry_id(i)?;
-                            let is_manager = p.agent
-                                == crate::routes::session::agents_split::MANAGER_LABEL;
+                            let is_manager =
+                                p.agent == crate::routes::session::agents_split::MANAGER_LABEL;
                             Some(cosh::harness::agent_coworkers::AgentCoworkerDescriptor {
                                 id,
                                 // The pane's IDENTITY rides the descriptor:
@@ -825,11 +825,10 @@ impl App {
         // there is exactly one live-pane write outside that pre-dispatch
         // necessity. Deduped: a pane already carrying the id is untouched.
         if live_session.as_deref() != Some(session_id.as_str())
-            && let Some(split) =
-                super::agents_dispatch::either_split_mut(
-                    &mut self.agents_split,
-                    &mut self.parked_agents_split,
-                )
+            && let Some(split) = super::agents_dispatch::either_split_mut(
+                &mut self.agents_split,
+                &mut self.parked_agents_split,
+            )
             && let Some(p) = split.panes.get_mut(pane)
         {
             p.session_id = Some(session_id.clone());
@@ -1758,12 +1757,9 @@ pub(super) fn build_manual_compaction_harness(
     if let Some(retention) = retention {
         connector = connector.with_prompt_cache_retention(retention);
     }
-    Ok(cosh::harness::Harness::new(
-        connector,
-        cwd,
-        std::collections::HashSet::new(),
+    Ok(
+        cosh::harness::Harness::new(connector, cwd, std::collections::HashSet::new())
+            .with_summarization_models(summarization_models)
+            .with_local_base_urls(local_base_urls),
     )
-    .with_summarization_models(summarization_models)
-    .with_local_base_urls(local_base_urls))
 }
-

@@ -109,9 +109,8 @@ mod tests {
             right: true,
             bottom: false,
         });
-        border_box.set_custom_border_chars(
-            crate::routes::session::tool_render::left_border_chars(),
-        );
+        border_box
+            .set_custom_border_chars(crate::routes::session::tool_render::left_border_chars());
         border_box.render_self(&mut expected, area);
         let mut bg_box = BoxRenderable::new();
         bg_box.set_background_color(Some(theme.background_panel.into()));

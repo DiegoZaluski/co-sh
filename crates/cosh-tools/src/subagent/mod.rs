@@ -40,11 +40,6 @@
 //! | `qwen` | `qwen --acp` |
 
 pub mod acp;
-pub mod model_picks;
-/// Brand palettes of the supported ACP sub-agents, for the TUI to paint
-/// each agent with its own logo colors. Pure RGB triples, no TUI
-/// dependency — see [`palette`].
-pub mod palette;
 /// The turn's final-message accumulator: which streamed text is the report
 /// the caller receives (the ACP analogue of the internal harness's
 /// `ContextItem::Closure`). Market-standard contract: only the LAST message
@@ -58,6 +53,11 @@ pub mod events;
 /// [`events::SubagentEvent`] stream the external ACP path emits, so both
 /// sub-agent flavors render identically in the TUI box.
 pub mod internal;
+pub mod model_picks;
+/// Brand palettes of the supported ACP sub-agents, for the TUI to paint
+/// each agent with its own logo colors. Pure RGB triples, no TUI
+/// dependency — see [`palette`].
+pub mod palette;
 /// Kernel-pinned filesystem sandbox for the ACP `fs/*` handlers (Unix only;
 /// other platforms use the validate-then-serve fallback in [`acp`]).
 #[cfg(unix)]
@@ -192,8 +192,7 @@ impl SubAgent {
             .iter()
             .copied()
             .filter(|name| {
-                acp::detect_installed().contains(name)
-                    || acp::custom_agent_installed(name)
+                acp::detect_installed().contains(name) || acp::custom_agent_installed(name)
             })
             .collect();
 
@@ -251,8 +250,7 @@ impl SubAgent {
             let agents_desc = installed
                 .iter()
                 .map(|name| {
-                    let entry = acp::find_agent(name)
-                        .expect("installed agent must be registered");
+                    let entry = acp::find_agent(name).expect("installed agent must be registered");
                     let invocation = entry.invocation();
                     format!("- {name:<name_w$}  {invocation}\n", name_w = name_w)
                 })

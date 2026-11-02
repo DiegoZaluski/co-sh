@@ -122,6 +122,7 @@ impl ScrollPill {
     /// Hit-test a click against the last drawn rect.
     #[must_use]
     pub fn hit(&self, x: u16, y: u16) -> bool {
-        self.area.is_some_and(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+        self.area
+            .is_some_and(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
     }
 }

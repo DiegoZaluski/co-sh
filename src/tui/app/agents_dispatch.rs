@@ -13,13 +13,13 @@
 //! reach the TUI through the shared `HarnessEvent` channel as
 //! `AgentsPaneEvent` (live stream) / `AgentsPaneDone` (final report).
 
+use crate::routes::session::right_panel::types::SubagentTimelineEntry;
+use cosh::harness::events::HarnessEvent;
+use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use crate::routes::session::right_panel::types::SubagentTimelineEntry;
-use cosh::harness::events::HarnessEvent;
-use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 
 use super::App;
 use crate::routes::session::agents_split::{
@@ -1134,7 +1134,11 @@ impl App {
         // word is literal (see `AgentCoworkerTurnEnd`). The forced close must not
         // pretend the pane failed on its own — that is exactly the
         // conflation this vocabulary removes.
-        split.finish_turn(pane, reason, cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::Cancelled);
+        split.finish_turn(
+            pane,
+            reason,
+            cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::Cancelled,
+        );
         // The force-close DROPS the winding-down turn's terminal Done (the
         // pane-idle gate in the event handler), which used to drop its
         // session binding with it — the stale-binding bug (issue 1,
@@ -1481,9 +1485,10 @@ impl App {
         };
         let manager_route = if is_manager_pane {
             let (provider, model) = match pane_selection.as_ref() {
-                Some(selection) => {
-                    (selection.provider.trim().to_string(), Some(selection.model.clone()))
-                }
+                Some(selection) => (
+                    selection.provider.trim().to_string(),
+                    Some(selection.model.clone()),
+                ),
                 None => (
                     self.llm_config.provider.trim().to_string(),
                     self.llm_config.model.clone(),
@@ -1855,11 +1860,12 @@ impl App {
         if self.state.status == crate::types::SessionStatus::Working {
             return;
         }
-        let notes: Vec<String> =
-            cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN)
-                .iter()
-                .map(cosh::harness::agent_coworkers::delivery_note)
-                .collect();
+        let notes: Vec<String> = cosh::harness::agent_coworkers::take_ready_deliveries(
+            cosh::harness::agent_coworkers::MAIN,
+        )
+        .iter()
+        .map(cosh::harness::agent_coworkers::delivery_note)
+        .collect();
         if notes.is_empty() {
             // Nothing parked (a wait-mode resolution whose receiver died —
             // the requester's turn was stopped): no promise left to keep.
@@ -1899,7 +1905,10 @@ impl App {
     /// - the Queue Actions hold is OFF: no auto-start while the user is
     ///   operating on queued messages (the same contract
     ///   `handle_loop_end` defers its own auto-start under).
-    pub(super) fn wake_main_agent_if_pending_todos(&mut self, todo: Option<&cosh_tools::plan::types::TodoList>) {
+    pub(super) fn wake_main_agent_if_pending_todos(
+        &mut self,
+        todo: Option<&cosh_tools::plan::types::TodoList>,
+    ) {
         if self.any_agent_running() {
             return;
         }
@@ -2052,7 +2061,9 @@ impl App {
                 // `Harness::with_own_coworker_id`), so a queued request always
                 // belongs to a pane that CAN free itself.
                 .filter(|(_, p)| {
-                    !p.running && !p.rehydrating && !cosh::harness::agent_coworkers::coworker_is_compacting(p.id)
+                    !p.running
+                        && !p.rehydrating
+                        && !cosh::harness::agent_coworkers::coworker_is_compacting(p.id)
                 })
                 .filter_map(|(i, _)| {
                     let id = split.pane_registry_id(i)?;
@@ -2514,8 +2525,10 @@ impl App {
         // their sessions. The store reads happen here, BEFORE the mutable
         // phase: `load_session` borrows `self` immutably and cannot run
         // under the split's `&mut` below.
-        let mut hydrated: Vec<(usize, crate::routes::session::agents_split::PaneModelSelection)> =
-            Vec::new();
+        let mut hydrated: Vec<(
+            usize,
+            crate::routes::session::agents_split::PaneModelSelection,
+        )> = Vec::new();
         if let Some(split) = either_split(&self.agents_split, &self.parked_agents_split) {
             for (index, pane) in split.panes.iter().enumerate() {
                 if pane.agent == MANAGER_LABEL
@@ -3047,7 +3060,10 @@ fn run_manager_turn(
                     // Gate-free fact capture (see the external turn's record):
                     // the Done may be dropped by the handler's gates, the
                     // binding fact may not be lost with it.
-                    cosh::harness::agent_coworkers::record_session_binding(pane_id, session_id.clone());
+                    cosh::harness::agent_coworkers::record_session_binding(
+                        pane_id,
+                        session_id.clone(),
+                    );
                     let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                         pane,
                         pane_id,
@@ -3130,7 +3146,9 @@ fn run_manager_turn(
                     // visual representation (none of the three does — the
                     // pane renders its own close).
                     match &event {
-                        HarnessEvent::Done { checkup_verdict, .. } => {
+                        HarnessEvent::Done {
+                            checkup_verdict, ..
+                        } => {
                             *cause_sink.lock().unwrap() = Some(TerminalCause {
                                 kind: TerminalKind::Done,
                                 detail: checkup_verdict.clone(),
@@ -3601,7 +3619,11 @@ mod tests {
 
         // A fresh pane (no picked ids) gets the persisted pick seeded.
         let picked = vec![];
-        let picks = pane_turn_picks(Some(&[model.clone(), untouched.clone()]), &picked, Some("persisted-model"));
+        let picks = pane_turn_picks(
+            Some(&[model.clone(), untouched.clone()]),
+            &picked,
+            Some("persisted-model"),
+        );
         assert_eq!(
             picks,
             vec![("model".to_string(), "persisted-model".to_string())],
@@ -3658,8 +3680,11 @@ mod tests {
         };
 
         // The seed rides the option's own id.
-        let picks =
-            pane_turn_picks(Some(std::slice::from_ref(&renamed)), &[], Some("persisted-model"));
+        let picks = pane_turn_picks(
+            Some(std::slice::from_ref(&renamed)),
+            &[],
+            Some("persisted-model"),
+        );
         assert_eq!(
             picks,
             vec![("session_model".to_string(), "persisted-model".to_string())],
@@ -3877,22 +3902,18 @@ mod tests {
         };
 
         // 1. A closure is the natural end.
-        let (text, end) = close_pane_turn(
-            Some(&done),
-            Some("the final answer".to_string()),
-            None,
+        let (text, end) = close_pane_turn(Some(&done), Some("the final answer".to_string()), None);
+        assert_eq!(
+            (text.as_str(), end),
+            ("the final answer", AgentCoworkerTurnEnd::EndTurn)
         );
-        assert_eq!((text.as_str(), end), ("the final answer", AgentCoworkerTurnEnd::EndTurn));
 
         // 2. THE REGRESSION: no closure, but the model wrote text one item
         // earlier (the turn ended on a tool result). It must be delivered as
         // a `partial` report — never as "ended without a report", and never
         // as `cancelled`.
-        let (text, end) = close_pane_turn(
-            Some(&done),
-            None,
-            Some("now I'll edit core.rs".to_string()),
-        );
+        let (text, end) =
+            close_pane_turn(Some(&done), None, Some("now I'll edit core.rs".to_string()));
         assert_eq!(text, "now I'll edit core.rs");
         assert_eq!(end, AgentCoworkerTurnEnd::Partial);
         assert!(!end.is_failure(), "a partial report is real content");
@@ -3924,5 +3945,4 @@ mod tests {
         assert_eq!(end, AgentCoworkerTurnEnd::Error);
         assert!(text.contains("bug, not a result"), "{text}");
     }
-
 }

@@ -85,19 +85,11 @@ fn tail_drag_out_of_the_box(app: &mut App) {
     // Drag down, leaving the box entirely: several rows past the bottom.
     for dy in 1..=3u16 {
         let _ = app
-            .handle_mouse_event(mouse(
-                CKind::Drag(CBtn::Left),
-                press_x,
-                area.bottom() + dy,
-            ))
+            .handle_mouse_event(mouse(CKind::Drag(CBtn::Left), press_x, area.bottom() + dy))
             .unwrap();
     }
     let _ = app
-        .handle_mouse_event(mouse(
-            CKind::Up(CBtn::Left),
-            press_x,
-            area.bottom() + 3,
-        ))
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), press_x, area.bottom() + 3))
         .unwrap();
 }
 
@@ -183,7 +175,10 @@ async fn drag_inside_the_box_still_copies() {
         .unwrap();
 
     let copied = copied_text(&app);
-    assert!(!copied.is_empty(), "an in-box drag must still produce a copy");
+    assert!(
+        !copied.is_empty(),
+        "an in-box drag must still produce a copy"
+    );
     assert!(
         app.prompt_view.input.starts_with(&copied),
         "a head-anchored drag copies a prefix of the draft, got {copied:?}"

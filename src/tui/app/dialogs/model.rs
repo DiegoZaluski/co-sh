@@ -350,11 +350,7 @@ impl App {
                 };
                 // The shared list-dialog filter edit: pop + selection reset
                 // + cursor blink, one definition for every cosh list box.
-                crate::component::list_dialog::pop_filter(
-                    filter,
-                    &mut d.selected,
-                    &mut d.cursor,
-                );
+                crate::component::list_dialog::pop_filter(filter, &mut d.selected, &mut d.cursor);
                 true
             }
             KeyCode::Char(ch) => {

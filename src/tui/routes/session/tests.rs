@@ -8092,14 +8092,13 @@ fn painted_vs_cached_report(
     frame: usize,
 ) {
     let vp_top = i32::from(area.y);
-    eprintln!("── frame {frame}: scroll_y={} cached_total={} actual_total={}",
-        view.scroll_y, view.cached_total_height, view.actual_total_height);
+    eprintln!(
+        "── frame {frame}: scroll_y={} cached_total={} actual_total={}",
+        view.scroll_y, view.cached_total_height, view.actual_total_height
+    );
     for (i, m) in markers.iter().enumerate() {
         let painted = find_row_containing(buf, m);
-        let cached_top = view
-            .prefix_y
-            .get(i)
-            .map(|&py| vp_top + py - view.scroll_y);
+        let cached_top = view.prefix_y.get(i).map(|&py| vp_top + py - view.scroll_y);
         let cached_h = view.msg_height_cache.get(i).copied();
         eprintln!(
             "msg {i} marker={m:?} painted_top={painted:?} cached_top={cached_top:?} cached_h={cached_h:?} {}",
@@ -8126,7 +8125,10 @@ fn probe_queue_after_block_sweep() {
             "bash-small-completed-then-text",
             vec![
                 bash_part("b1", 3, ToolStatus::Completed),
-                Part::Text(TextPart { text: String::new(), synthetic: false }),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
             ],
             "after-block",
         ),
@@ -8134,7 +8136,10 @@ fn probe_queue_after_block_sweep() {
             "bash-large-completed-then-text",
             vec![
                 bash_part("b2", 20, ToolStatus::Completed),
-                Part::Text(TextPart { text: String::new(), synthetic: false }),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
             ],
             "after-block",
         ),
@@ -8142,14 +8147,20 @@ fn probe_queue_after_block_sweep() {
             "bash-running-then-text",
             vec![
                 bash_part("b3", 5, ToolStatus::Running),
-                Part::Text(TextPart { text: String::new(), synthetic: false }),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
             ],
             "after-block",
         ),
         (
             "text-then-bash-completed",
             vec![
-                Part::Text(TextPart { text: String::new(), synthetic: false }),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
                 bash_part("b4", 8, ToolStatus::Completed),
             ],
             "block-last",
@@ -8172,9 +8183,13 @@ fn probe_queue_after_block_sweep() {
                     t.output = Some(
                         out.lines()
                             .enumerate()
-                            .map(|(i, l)| if l.starts_with("line ") {
-                                format!("B{i} {l}")
-                            } else { l.to_string() })
+                            .map(|(i, l)| {
+                                if l.starts_with("line ") {
+                                    format!("B{i} {l}")
+                                } else {
+                                    l.to_string()
+                                }
+                            })
                             .collect::<Vec<_>>()
                             .join("\n"),
                     );
@@ -8220,8 +8235,9 @@ fn probe_queue_after_block_sweep() {
                         t.text.push('\n');
                     }
                     let start = 10 + frame * 5;
-                    t.text.push_str(&stream_text(start..start + 5)
-                        .replace("streaming line number", "S"));
+                    t.text.push_str(
+                        &stream_text(start..start + 5).replace("streaming line number", "S"),
+                    );
                 }
                 // A running tool also keeps producing output.
                 for p in m.parts.iter_mut() {
@@ -8234,7 +8250,11 @@ fn probe_queue_after_block_sweep() {
                             .map(|i| format!("B{i} line {i}"))
                             .collect::<Vec<_>>()
                             .join("\n");
-                        t.output = Some(if out.is_empty() { extra } else { format!("{out}\n{extra}") });
+                        t.output = Some(if out.is_empty() {
+                            extra
+                        } else {
+                            format!("{out}\n{extra}")
+                        });
                     }
                 }
             }
@@ -8332,14 +8352,20 @@ fn probe_hover_tint_vs_painted_content() {
     );
     eprintln!(
         "[TINT] cached: prefix_y={:?} msg_h={:?} scroll_y={} total={} actual={}",
-        view.prefix_y, view.msg_height_cache, view.scroll_y,
-        view.cached_total_height, view.actual_total_height
+        view.prefix_y,
+        view.msg_height_cache,
+        view.scroll_y,
+        view.cached_total_height,
+        view.actual_total_height
     );
 
     // Hover directly over the painted queued-message row.
     let qy = queue_row.expect("queued message must be painted");
     view.update_hover(area.x + 10, qy, area, &state, &config);
-    eprintln!("[TINT] hover painted row {qy} -> idx {:?}", view.hovered_msg_idx);
+    eprintln!(
+        "[TINT] hover painted row {qy} -> idx {:?}",
+        view.hovered_msg_idx
+    );
 
     // Re-render WITH the hover active so render_hover_highlight paints.
     let mut buf2 = Buffer::empty(area);
@@ -8349,11 +8375,7 @@ fn probe_hover_tint_vs_painted_content() {
     let mut tint_rows: Vec<u16> = Vec::new();
     for y in 0..area.height {
         let n = (0..area.width)
-            .filter(|&x| {
-                buf2.cell((x, y))
-                    .map(|c| c.bg == tint)
-                    .unwrap_or(false)
-            })
+            .filter(|&x| buf2.cell((x, y)).map(|c| c.bg == tint).unwrap_or(false))
             .count();
         if n > 0 {
             tint_rows.push(y);
@@ -8379,10 +8401,7 @@ fn probe_hover_tint_vs_painted_content() {
         );
     }
 
-    assert!(
-        !tint_rows.is_empty(),
-        "hover produced no tint at all"
-    );
+    assert!(!tint_rows.is_empty(), "hover produced no tint at all");
     let tint_first = tint_rows[0];
     assert!(
         i32::from(tint_first) >= i32::from(qy) - 1,
@@ -8393,7 +8412,6 @@ fn probe_hover_tint_vs_painted_content() {
         i32::from(qy) - i32::from(tint_first)
     );
 }
-
 
 /// Build a completed fs_edit (diff) tool part with `n` changed line pairs.
 fn edit_part(tool_call_id: &str, n: usize) -> Part {
@@ -8451,15 +8469,15 @@ fn probe_queue_after_block_offset_drift() {
                 agent: None,
                 model: None,
             };
-            let mut state =
-                test_state_msgs(vec![user_msg("msg-0", "first question"), stream]);
+            let mut state = test_state_msgs(vec![user_msg("msg-0", "first question"), stream]);
             let mut view = SessionView::new();
 
-            let offset = |view: &SessionView, buf: &Buffer, marker: &str, idx: usize| -> Option<i32> {
-                let painted = find_row_containing(buf, marker)? as i32;
-                let cached = i32::from(area.y) + view.prefix_y[idx] - view.scroll_y;
-                Some(painted - cached)
-            };
+            let offset =
+                |view: &SessionView, buf: &Buffer, marker: &str, idx: usize| -> Option<i32> {
+                    let painted = find_row_containing(buf, marker)? as i32;
+                    let cached = i32::from(area.y) + view.prefix_y[idx] - view.scroll_y;
+                    Some(painted - cached)
+                };
 
             // Baseline frames (streaming, before injection).
             let mut buf = Buffer::empty(area);
@@ -8467,10 +8485,14 @@ fn probe_queue_after_block_offset_drift() {
             view.render(&mut buf, area, &state, &theme, &config, 0.016);
             let base_u0 = offset(&view, &buf, "first question", 0);
             let base_m1 = offset(&view, &buf, "$ echo hello", 1);
-            eprintln!("baseline: u0_off={base_u0:?} m1_off={base_m1:?} est={:?} cellh={:?} scroll={}",
+            eprintln!(
+                "baseline: u0_off={base_u0:?} m1_off={base_m1:?} est={:?} cellh={:?} scroll={}",
                 view.msg_height_cache,
-                (0..view.msg_cache_h.len()).map(|i| view.msg_cache_h[i]).collect::<Vec<_>>(),
-                view.scroll_y);
+                (0..view.msg_cache_h.len())
+                    .map(|i| view.msg_cache_h[i])
+                    .collect::<Vec<_>>(),
+                view.scroll_y
+            );
 
             // Queue injection.
             {
@@ -8499,8 +8521,12 @@ fn probe_queue_after_block_offset_drift() {
                 eprintln!(
                     "frame {frame}: u0_off={u0:?} m1_off={m1:?} m2_off={m2:?} est={:?} cellh={:?} scroll={} total={} actual={}",
                     view.msg_height_cache,
-                    (0..view.msg_cache_h.len()).map(|i| view.msg_cache_h[i]).collect::<Vec<_>>(),
-                    view.scroll_y, view.cached_total_height, view.actual_total_height
+                    (0..view.msg_cache_h.len())
+                        .map(|i| view.msg_cache_h[i])
+                        .collect::<Vec<_>>(),
+                    view.scroll_y,
+                    view.cached_total_height,
+                    view.actual_total_height
                 );
                 // The queued message must be visible; hover it and report.
                 if let Some(qy) = find_row_containing(&buf, "queued follow-up") {
@@ -8526,15 +8552,51 @@ fn probe_tint_alignment_per_message() {
 
     let variants: Vec<(&str, Vec<Part>, usize)> = vec![
         // (name, assistant parts, streamed text lines at injection)
-        ("bash-first", vec![bash_part("b1", 8, ToolStatus::Completed),
-            Part::Text(TextPart { text: String::new(), synthetic: false })], 20),
-        ("edit-first", vec![edit_part("e2", 3),
-            Part::Text(TextPart { text: String::new(), synthetic: false })], 20),
-        ("text-then-bash", vec![Part::Text(TextPart { text: String::new(), synthetic: false }),
-            bash_part("b3", 4, ToolStatus::Completed)], 20),
-        ("bash-then-edit", vec![bash_part("b4", 5, ToolStatus::Completed),
-            edit_part("e5", 2),
-            Part::Text(TextPart { text: String::new(), synthetic: false })], 15),
+        (
+            "bash-first",
+            vec![
+                bash_part("b1", 8, ToolStatus::Completed),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
+            ],
+            20,
+        ),
+        (
+            "edit-first",
+            vec![
+                edit_part("e2", 3),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
+            ],
+            20,
+        ),
+        (
+            "text-then-bash",
+            vec![
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
+                bash_part("b3", 4, ToolStatus::Completed),
+            ],
+            20,
+        ),
+        (
+            "bash-then-edit",
+            vec![
+                bash_part("b4", 5, ToolStatus::Completed),
+                edit_part("e5", 2),
+                Part::Text(TextPart {
+                    text: String::new(),
+                    synthetic: false,
+                }),
+            ],
+            15,
+        ),
     ];
 
     for (name, parts, pre_lines) in &variants {
@@ -8580,9 +8642,8 @@ fn probe_tint_alignment_per_message() {
         let tinted_rows = |buf: &Buffer| -> Vec<u16> {
             (0..buf.area.height)
                 .filter(|&y| {
-                    (0..buf.area.width).any(|x| {
-                        buf.cell((x, y)).map(|c| c.bg == tint).unwrap_or(false)
-                    })
+                    (0..buf.area.width)
+                        .any(|x| buf.cell((x, y)).map(|c| c.bg == tint).unwrap_or(false))
                 })
                 .collect()
         };
@@ -8592,8 +8653,15 @@ fn probe_tint_alignment_per_message() {
         let q_text = find_row_containing(&buf, "queued follow-up");
         // msg-0 is usually top-clipped; sweep a few scroll positions so its
         // painted span is visible at least once.
-        for scroll in [0i32, view.cached_total_height - i32::from(area.height), view.cached_total_height / 2] {
-            view.scroll_y = scroll.clamp(0, (view.actual_total_height - i32::from(area.height)).max(0));
+        for scroll in [
+            0i32,
+            view.cached_total_height - i32::from(area.height),
+            view.cached_total_height / 2,
+        ] {
+            view.scroll_y = scroll.clamp(
+                0,
+                (view.actual_total_height - i32::from(area.height)).max(0),
+            );
             let mut buf = Buffer::empty(area);
             view.render(&mut buf, area, &state, &theme, &config, 0.016);
 
@@ -8605,13 +8673,20 @@ fn probe_tint_alignment_per_message() {
                 let mut tbuf = Buffer::empty(area);
                 view.render(&mut tbuf, area, &state, &theme, &config, 0.016);
                 let rows = tinted_rows(&tbuf);
-                let marker = if idx == 0 { "first question" } else { "queued follow-up" };
+                let marker = if idx == 0 {
+                    "first question"
+                } else {
+                    "queued follow-up"
+                };
                 let painted = find_row_containing(&tbuf, marker);
                 eprintln!(
                     "scroll={:>3} msg{idx}: painted_text_row={painted:?} tint_rows={rows:?} cached_span=[{},{}",
                     view.scroll_y,
                     i32::from(area.y) + view.prefix_y[idx] - view.scroll_y,
-                    i32::from(area.y) + view.prefix_y[idx] + i64::from(view.msg_height_cache[idx]) as i32 - view.scroll_y
+                    i32::from(area.y)
+                        + view.prefix_y[idx]
+                        + i64::from(view.msg_height_cache[idx]) as i32
+                        - view.scroll_y
                 );
                 if let (Some(pr), Some(first)) = (painted, rows.first()) {
                     // The tint must not start ABOVE the message's painted
@@ -8645,8 +8720,22 @@ fn probe_estimate_vs_paint_row_counts() {
         ("cjk", "日本語のテキストです。".repeat(12)),
         ("emoji", "👍👍👍 ok ".repeat(10)),
         ("long-token", "a".repeat(200)),
-        ("code-fence", format!("```rust\n{}\n```\n", "let x = 1; // 日本語コメント ".repeat(6))),
-        ("mixed", format!("texto {} mais {} fim\n\n```js\nconst s = \"{}\";\n```\n", "日本語".repeat(20), "ok ".repeat(30), "x".repeat(80))),
+        (
+            "code-fence",
+            format!(
+                "```rust\n{}\n```\n",
+                "let x = 1; // 日本語コメント ".repeat(6)
+            ),
+        ),
+        (
+            "mixed",
+            format!(
+                "texto {} mais {} fim\n\n```js\nconst s = \"{}\";\n```\n",
+                "日本語".repeat(20),
+                "ok ".repeat(30),
+                "x".repeat(80)
+            ),
+        ),
     ];
 
     for (name, text) in &cases {
@@ -8670,7 +8759,10 @@ fn probe_estimate_vs_paint_row_counts() {
                 }
             }
         }
-        eprintln!("[EST] {name}: est={est} painted={last} delta={}", last as i64 - est as i64);
+        eprintln!(
+            "[EST] {name}: est={est} painted={last} delta={}",
+            last as i64 - est as i64
+        );
     }
 }
 
@@ -8751,7 +8843,10 @@ fn probe_block_estimate_vs_painted_advance() {
         })
     };
     let mk_write = |n: usize| {
-        let content: String = (0..n).map(|i| format!("line {i} of the file")).collect::<Vec<_>>().join("\n");
+        let content: String = (0..n)
+            .map(|i| format!("line {i} of the file"))
+            .collect::<Vec<_>>()
+            .join("\n");
         Part::Tool(ToolPart {
             tool: "fs_write".into(),
             input: serde_json::json!({ "file_path": "src/out.rs", "content": content }),
@@ -8807,7 +8902,11 @@ fn probe_block_estimate_vs_painted_advance() {
         view.render(&mut buf, area, &state, &theme, &config, 0.016);
 
         let est = SessionView::estimate_part_height(
-            part, max_w, &config, &MessageRole::Assistant, &view.tool_state,
+            part,
+            max_w,
+            &config,
+            &MessageRole::Assistant,
+            &view.tool_state,
         );
         // painted msg1 top: cached prefix_y[1] is exact for the simple user
         // msg above; the walk paints msg1 at prefix_y[1] (gap included).
@@ -8816,12 +8915,14 @@ fn probe_block_estimate_vs_painted_advance() {
         let msg1_top_cached = view.prefix_y[1]; // content rows (viewport top = 0 content)
         // painted msg1_top on screen = prefix_y[1] - scroll_y + vp_top; with a
         // tall viewport scroll_y = 0 → screen row == content row.
-        let painted_advance = i64::from(marker_row) - i64::from(msg1_top_cached)
-            - i64::from(area.y);
+        let painted_advance =
+            i64::from(marker_row) - i64::from(msg1_top_cached) - i64::from(area.y);
         let drift = i64::from(est) - painted_advance;
         eprintln!("[DRIFT] {name:>9}: est={est} painted_advance={painted_advance} drift={drift}");
         if drift != 0 {
-            failures.push(format!("{name}: est={est} painted={painted_advance} drift={drift}"));
+            failures.push(format!(
+                "{name}: est={est} painted={painted_advance} drift={drift}"
+            ));
         }
     }
     assert!(
@@ -8887,10 +8988,11 @@ fn probe_real_event_order_drift() {
                 view.prefix_y
             );
             if let Some(qy) = find_row_containing(buf, "queued follow-up") {
-                let off2 = qy as i32
-                    - (i32::from(area.y) + view.prefix_y[2] - view.scroll_y);
-                eprintln!("   queued msg painted row {qy}, cached row {}, OFFSET {off2}",
-                    i32::from(area.y) + view.prefix_y[2] - view.scroll_y);
+                let off2 = qy as i32 - (i32::from(area.y) + view.prefix_y[2] - view.scroll_y);
+                eprintln!(
+                    "   queued msg painted row {qy}, cached row {}, OFFSET {off2}",
+                    i32::from(area.y) + view.prefix_y[2] - view.scroll_y
+                );
             }
         };
 
@@ -8940,8 +9042,9 @@ fn probe_real_event_order_drift() {
                         t.text.push('\n');
                     }
                     let start = f * 4;
-                    t.text
-                        .push_str(&stream_text(start..start + 4).replace("streaming line number", "N"));
+                    t.text.push_str(
+                        &stream_text(start..start + 4).replace("streaming line number", "N"),
+                    );
                 }
             }
             view.scroll_to_bottom();
@@ -8976,7 +9079,11 @@ fn probe_streaming_cache_final_height_vs_full_estimate() {
     let docs: Vec<(&str, String, Vec<usize>)> = vec![
         (
             "plain-paragraphs",
-            format!("{}\n\n{}", "para one line\n".repeat(6), "para two line\n".repeat(6)),
+            format!(
+                "{}\n\n{}",
+                "para one line\n".repeat(6),
+                "para two line\n".repeat(6)
+            ),
             vec![10, 10, 10, 10, 10, 10],
         ),
         (
@@ -9055,7 +9162,6 @@ fn probe_streaming_cache_final_height_vs_full_estimate() {
     );
 }
 
-
 /// PROBE E (the status flip): queue injected mid-turn, deltas keep arriving
 /// (height FROZEN at the injection-time estimate), then the turn ends
 /// (Working → Idle) and the walk switches to the non-streaming render path
@@ -9076,7 +9182,12 @@ fn probe_status_flip_drift_after_injection() {
         ("bash-8", bash_part("b2", 8, ToolStatus::Completed), 20, 5),
         ("edit-2", edit_part("e3", 2), 20, 5),
         ("edit-12", edit_part("e4", 12), 20, 5),
-        ("bash-2-nodelta", bash_part("b5", 2, ToolStatus::Completed), 20, 0),
+        (
+            "bash-2-nodelta",
+            bash_part("b5", 2, ToolStatus::Completed),
+            20,
+            0,
+        ),
         ("edit-2-nodelta", edit_part("e6", 2), 20, 0),
     ];
 
@@ -9126,7 +9237,9 @@ fn probe_status_flip_drift_after_injection() {
                 "working f{f}: q_painted={qy:?} q_cached={} est={:?} scroll={} total={} actual={}",
                 i32::from(area.y) + view.prefix_y[2] - view.scroll_y,
                 view.msg_height_cache,
-                view.scroll_y, view.cached_total_height, view.actual_total_height
+                view.scroll_y,
+                view.cached_total_height,
+                view.actual_total_height
             );
         }
 
@@ -9143,7 +9256,9 @@ fn probe_status_flip_drift_after_injection() {
             eprintln!(
                 "idle    f{f}: q_painted={qy:?} q_cached={q_cached} DRIFT={drift:?} est={:?} scroll={} total={} actual={}",
                 view.msg_height_cache,
-                view.scroll_y, view.cached_total_height, view.actual_total_height
+                view.scroll_y,
+                view.cached_total_height,
+                view.actual_total_height
             );
             // Hover the row where the queued message is PAINTED.
             if let Some(r) = qy {
@@ -9155,7 +9270,10 @@ fn probe_status_flip_drift_after_injection() {
                 let mut tb = Buffer::empty(area);
                 view.render(&mut tb, area, &state, &theme, &config, 0.016);
                 let tint_rows: Vec<u16> = (0..area.height)
-                    .filter(|&y| (0..area.width).any(|x| tb.cell((x, y)).map(|c| c.bg == tint).unwrap_or(false)))
+                    .filter(|&y| {
+                        (0..area.width)
+                            .any(|x| tb.cell((x, y)).map(|c| c.bg == tint).unwrap_or(false))
+                    })
                     .collect();
                 eprintln!("   tint_rows={tint_rows:?} (painted queued text at {r})");
             }
@@ -9339,7 +9457,10 @@ fn probe_hover_none_vs_render_stream_state_layout() {
         role: MessageRole::Assistant,
         parts: vec![
             bash_part("b1", 4, ToolStatus::Completed),
-            Part::Text(TextPart { text: String::new(), synthetic: false }),
+            Part::Text(TextPart {
+                text: String::new(),
+                synthetic: false,
+            }),
         ],
         created_at: 0,
         agent: None,
@@ -9352,7 +9473,10 @@ fn probe_hover_none_vs_render_stream_state_layout() {
     let mut buf = Buffer::empty(area);
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
-    eprintln!("[F] warm: est={:?} prefix_y={:?}", view.msg_height_cache, view.prefix_y);
+    eprintln!(
+        "[F] warm: est={:?} prefix_y={:?}",
+        view.msg_height_cache, view.prefix_y
+    );
 
     // Stream a document whose full-document estimate and streaming-cache
     // height may disagree (paragraph + fence streamed in chunks).
@@ -9366,12 +9490,16 @@ fn probe_hover_none_vs_render_stream_state_layout() {
     while pos < full.len() {
         let end = (pos + 24).min(full.len());
         let mut end = end;
-        while !full.is_char_boundary(end) { end += 1; }
+        while !full.is_char_boundary(end) {
+            end += 1;
+        }
         {
             let s = state.current_session_mut().unwrap();
             let m = s.messages.iter_mut().find(|m| m.id == "msg-1").unwrap();
             if let Some(Part::Text(t)) = m.parts.last_mut() {
-                if !t.text.is_empty() { t.text.push('\n'); }
+                if !t.text.is_empty() {
+                    t.text.push('\n');
+                }
                 t.text.push_str(&full[pos..end]);
             }
         }
@@ -9379,22 +9507,35 @@ fn probe_hover_none_vs_render_stream_state_layout() {
         view.scroll_to_bottom();
         let mut b = Buffer::empty(area);
         view.render(&mut b, area, &state, &theme, &config, 0.016);
-        let render_layout = (view.msg_height_cache.clone(), view.prefix_y.clone(), view.cached_total_height);
+        let render_layout = (
+            view.msg_height_cache.clone(),
+            view.prefix_y.clone(),
+            view.cached_total_height,
+        );
 
         // HOVER in the same iteration (ensure(None) path) — the real loop's
         // mouse event lands here, between frames.
         view.update_hover(area.x + 10, area.y + 5, area, &state, &config);
-        let hover_layout = (view.msg_height_cache.clone(), view.prefix_y.clone(), view.cached_total_height);
+        let hover_layout = (
+            view.msg_height_cache.clone(),
+            view.prefix_y.clone(),
+            view.cached_total_height,
+        );
         if hover_layout != render_layout {
             eprintln!(
                 "[F] frame {frame}: RENDER {render_layout:?}\n    HOVER {hover_layout:?}\n    *** LAYOUT CHANGED BY HOVER"
             );
         } else {
-            eprintln!("[F] frame {frame}: layouts agree (est={} total={})", render_layout.0[1], render_layout.2);
+            eprintln!(
+                "[F] frame {frame}: layouts agree (est={} total={})",
+                render_layout.0[1], render_layout.2
+            );
         }
         pos = end;
         frame += 1;
-        if frame > 6 { break; }
+        if frame > 6 {
+            break;
+        }
     }
 }
 
@@ -9426,7 +9567,10 @@ fn regression_hover_must_not_mutate_layout_during_streaming() {
         role: MessageRole::Assistant,
         parts: vec![
             bash_part("b1", 4, ToolStatus::Completed),
-            Part::Text(TextPart { text: String::new(), synthetic: false }),
+            Part::Text(TextPart {
+                text: String::new(),
+                synthetic: false,
+            }),
         ],
         created_at: 0,
         agent: None,
@@ -9558,8 +9702,7 @@ fn interleaved_thought_growth_keeps_heights_and_tail_fresh() {
     // (exactly what `push_reasoning` does once a Text part is present).
     for k in 1..=6 {
         if let Some(session) = state.current_session_mut() {
-            session.messages[0]
-                .push_reasoning(&format!("\n\nthought segment {k} MARKER-{k}"));
+            session.messages[0].push_reasoning(&format!("\n\nthought segment {k} MARKER-{k}"));
         }
         let mut buf = Buffer::empty(area);
         view.render(&mut buf, area, &state, &theme, &config, 0.016);
@@ -9646,8 +9789,7 @@ fn thought_streaming_through_text_opening_keeps_the_tail_reachable() {
     // Reasoning part while the answer text also keeps streaming.
     for k in 4..=8 {
         if let Some(session) = state.current_session_mut() {
-            session.messages[0]
-                .push_reasoning(&format!("\n\nlate thought {k} TAIL-{k}"));
+            session.messages[0].push_reasoning(&format!("\n\nlate thought {k} TAIL-{k}"));
             if let Some(Part::Text(t)) = session.messages[0].parts.last_mut() {
                 t.text.push_str(&format!(" and more answer {k}"));
             }

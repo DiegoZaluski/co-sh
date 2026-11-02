@@ -39,9 +39,7 @@ impl AnySpinner {
             cosh::setup::SpinnerStyle::Bass => {
                 AnySpinner::Bass(AgentSpinnerBass::new(label, theme))
             }
-            cosh::setup::SpinnerStyle::Runes => {
-                AnySpinner::Runes(AgentSpinner::new(label, theme))
-            }
+            cosh::setup::SpinnerStyle::Runes => AnySpinner::Runes(AgentSpinner::new(label, theme)),
             cosh::setup::SpinnerStyle::Opencode => {
                 AnySpinner::Opencode(AgentSpinnerOpencode::new(label, theme))
             }

@@ -154,7 +154,8 @@ async fn non_model_picks_and_defaults_never_persist() {
             pane_id: app.agents_split.as_ref().unwrap().panes[0].id,
             epoch: app.agents_pane_epoch,
             event: SubagentEvent::ConfigOptions {
-                options: vec![model_option("model-a"),
+                options: vec![
+                    model_option("model-a"),
                     AgentConfigOption {
                         id: "reasoning".to_string(),
                         name: "Reasoning".to_string(),
@@ -166,7 +167,8 @@ async fn non_model_picks_and_defaults_never_persist() {
                         }],
                         current: "high".to_string(),
                         boolean: None,
-                    }],
+                    },
+                ],
             },
         })
         .ok();

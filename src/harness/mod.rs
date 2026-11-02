@@ -3,6 +3,7 @@
 //! Bridges LLM responses to tool execution through three tiers:
 //! internal harness tools, local cosh-tools, and external MCP servers.
 
+pub mod agent_coworkers;
 pub mod background;
 pub mod checkup;
 pub mod context;
@@ -12,7 +13,6 @@ pub mod events;
 pub mod guardrails;
 pub mod hooks;
 pub mod lsp;
-pub mod agent_coworkers;
 pub mod queued_input;
 pub mod title;
 pub mod tools;

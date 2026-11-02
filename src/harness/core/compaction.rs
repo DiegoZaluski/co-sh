@@ -4,24 +4,24 @@
 //! Free items (constants, error/outcome classification, stop-signal polling
 //! and window discovery) precede the `impl Harness` block.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
 use tokio::time::Duration;
 
-use cosh_sdk::connector::{ChatStream, Connector, ConnectorError};
 #[cfg(not(test))]
 use cosh_sdk::connector::discover_context_window;
+use cosh_sdk::connector::{ChatStream, Connector, ConnectorError};
 
-use super::{Harness, ManualCompactionOutcome, RunOutcome, StreamEvent};
 #[cfg(not(test))]
 use super::context::error_catalog_window;
 #[cfg(test)]
 use super::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER};
+use super::{Harness, ManualCompactionOutcome, RunOutcome, StreamEvent};
 
 /// How many times a generic (non-context-window) summarizer error is retried
 /// before the harness gives up and surfaces a TUI notification.

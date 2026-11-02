@@ -149,7 +149,8 @@ mod tests {
     /// still resolve, otherwise token accounting silently drops to nothing.
     #[test]
     fn kimi_per_choice_usage_falls_back() {
-        let json = r#"{"choices":[{"delta":{},"usage":{"prompt_tokens":100,"completion_tokens":20}}]}"#;
+        let json =
+            r#"{"choices":[{"delta":{},"usage":{"prompt_tokens":100,"completion_tokens":20}}]}"#;
         let usage = extract_usage(json).expect("per-choice usage must resolve");
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 20);

@@ -966,10 +966,8 @@ impl Setup {
                     .as_millis();
                 // The pid suffix keeps two processes quarantining in the
                 // same millisecond from clobbering each other's backup.
-                let quarantine = path.with_extension(format!(
-                    "json.corrupt-{epoch_ms}-{}",
-                    std::process::id()
-                ));
+                let quarantine =
+                    path.with_extension(format!("json.corrupt-{epoch_ms}-{}", std::process::id()));
                 match std::fs::rename(&path, &quarantine) {
                     Ok(()) => log::warn!(
                         "setup.json is corrupt ({error}); quarantined to {} and defaults apply",
@@ -1171,13 +1169,7 @@ impl Setup {
     ) -> Vec<(String, String, crate::setup::CustomProviderFamily)> {
         self.custom_providers
             .iter()
-            .map(|entry| {
-                (
-                    entry.name.clone(),
-                    entry.base_url.clone(),
-                    entry.family,
-                )
-            })
+            .map(|entry| (entry.name.clone(), entry.base_url.clone(), entry.family))
             .collect()
     }
 
@@ -1817,8 +1809,7 @@ mod tests {
             "the temp file must be consumed by the rename"
         );
         // The on-disk file is complete, parseable JSON — never a fragment.
-        let parsed: Setup =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let parsed: Setup = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(parsed.appearance.theme, "dracula");
     }
 
@@ -1844,7 +1835,10 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .find(|entry| {
-                entry.file_name().to_string_lossy().starts_with("setup.json.corrupt-")
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("setup.json.corrupt-")
             })
             .expect("the corrupt file must be quarantined beside the original");
         assert!(
@@ -1937,9 +1931,7 @@ mod tests {
                 s.push_str("-changed");
                 true
             }
-            serde_json::Value::Array(items) => {
-                items.iter_mut().any(bump_first_scalar)
-            }
+            serde_json::Value::Array(items) => items.iter_mut().any(bump_first_scalar),
             serde_json::Value::Object(map) => map
                 .iter_mut()
                 .filter(|(key, _)| key.as_str() != "kind" && key.as_str() != "type")

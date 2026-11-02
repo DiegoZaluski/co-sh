@@ -9,13 +9,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::agent_colors::AgentColors;
 use crate::component::cursor::{Cursor, CursorState, paint_cursor_cell};
 use crate::component::wall;
 use crate::logo::ChatLogo;
 use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
-use crate::agent_colors::AgentColors;
 use crate::types::{MessageRole, Part, Session};
 use crate::util::draw::draw_text_line;
 use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
@@ -1904,7 +1904,11 @@ mod tests {
             );
             prev = pos;
         }
-        assert_eq!(prev, view.input.len(), "the last line's tail is the input end");
+        assert_eq!(
+            prev,
+            view.input.len(),
+            "the last line's tail is the input end"
+        );
 
         // A mid-line click must also stay on a boundary and point AT the
         // character under the mouse (the byte offset of its start).
@@ -1960,7 +1964,11 @@ mod tests {
         // The inverted direction (drag up) yields the same text.
         view.begin_selection(view.input.len(), false);
         view.sel_end = Some(start);
-        assert_eq!(view.selected_text(), copied, "drag direction must not matter");
+        assert_eq!(
+            view.selected_text(),
+            copied,
+            "drag direction must not matter"
+        );
     }
 
     #[test]

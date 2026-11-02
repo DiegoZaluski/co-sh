@@ -204,7 +204,11 @@ fn fade_factor(state: &ScannerState) -> f32 {
 #[allow(clippy::cast_precision_loss)]
 fn trail_colors(base: RGBA) -> Vec<(RGBA, f32)> {
     let (r, g, b, _) = base.to_ints();
-    let (r, g, b) = (f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0);
+    let (r, g, b) = (
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+    );
 
     (0..TRAIL_STEPS)
         .map(|i| {
@@ -408,7 +412,10 @@ impl AgentSpinnerOpencode {
             // deriveInactiveColor: same RGB, alpha = inactiveFactor, then
             // scaled by the global fade factor.
             let alpha = INACTIVE_FACTOR * fade_factor(&state);
-            (INACTIVE_CHAR, composite(self.background, self.scan_color, alpha))
+            (
+                INACTIVE_CHAR,
+                composite(self.background, self.scan_color, alpha),
+            )
         }
     }
 
@@ -584,7 +591,8 @@ mod tests {
         let expected = (1.0 - 0.5 * (1.0 - MIN_ALPHA)).max(MIN_ALPHA);
         assert!((fade_factor(&mid) - expected).abs() < 1e-6);
         let end = scanner_state(base + HOLD_START - 1);
-        let expected_end = (1.0 - ((HOLD_START - 1) as f32 / HOLD_START as f32) * (1.0 - MIN_ALPHA))
+        let expected_end = (1.0
+            - ((HOLD_START - 1) as f32 / HOLD_START as f32) * (1.0 - MIN_ALPHA))
             .max(MIN_ALPHA);
         assert!((fade_factor(&end) - expected_end).abs() < 1e-6);
 
@@ -691,7 +699,10 @@ mod tests {
             spinner.advance();
         }
         assert_eq!(spinner.scan_frame(), 90);
-        assert_eq!(scanner_state(90).active_position, scanner_state(36).active_position);
+        assert_eq!(
+            scanner_state(90).active_position,
+            scanner_state(36).active_position
+        );
     }
 
     #[test]
@@ -744,11 +755,17 @@ mod tests {
         }
 
         spinner.set_activity(AgentActivity::Searching);
-        assert_eq!(spinner.status_frame(), super::super::agent_spinner::SEARCHING_FRAMES[0]);
+        assert_eq!(
+            spinner.status_frame(),
+            super::super::agent_spinner::SEARCHING_FRAMES[0]
+        );
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
         spinner.render(&mut buf, 0, 0);
         let ex = spinner.status_x_for_test();
-        assert_eq!(buf[(ex, 0)].symbol(), super::super::agent_spinner::SEARCHING_FRAMES[0]);
+        assert_eq!(
+            buf[(ex, 0)].symbol(),
+            super::super::agent_spinner::SEARCHING_FRAMES[0]
+        );
     }
 
     #[test]

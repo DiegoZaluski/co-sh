@@ -187,8 +187,9 @@ pub(crate) fn subagent_diff_block(
     let mut scratch = Buffer::empty(area);
     let mut diff = DiffRenderable::new(Some(unified.to_string()));
     diff.set_show_line_numbers(true);
-    diff.set_code_lang(crate::routes::session::tool_render::lang_name_from_path(path)
-        .map(str::to_string));
+    diff.set_code_lang(
+        crate::routes::session::tool_render::lang_name_from_path(path).map(str::to_string),
+    );
     diff.set_added_bg(theme.diff_added_bg);
     diff.set_removed_bg(theme.diff_removed_bg);
     diff.set_context_bg(theme.diff_context_bg);
@@ -1398,9 +1399,7 @@ impl SubagentActivity {
             // `seal_completed` receives the full final output before any
             // truncation.
             let in_body = match (&self.timeline[pos], report_body) {
-                (SubagentTimelineEntry::Message { text }, Some(body)) => {
-                    body.contains(text.trim())
-                }
+                (SubagentTimelineEntry::Message { text }, Some(body)) => body.contains(text.trim()),
                 _ => false,
             };
             if in_body {
@@ -1481,13 +1480,13 @@ impl SubagentActivity {
         // entry, and the box scrolls in arrival order like the chat.
         if let Some(acc) = self.timeline.last_mut().and_then(|entry| match entry {
             SubagentTimelineEntry::Message { text: acc } if kind == StreamKind::Agent => Some(acc),
-            SubagentTimelineEntry::Thought { text: acc } if kind == StreamKind::Thought => Some(acc),
+            SubagentTimelineEntry::Thought { text: acc } if kind == StreamKind::Thought => {
+                Some(acc)
+            }
             SubagentTimelineEntry::UserMessage { text: acc } if kind == StreamKind::User => {
                 Some(acc)
             }
-            SubagentTimelineEntry::AgentMessage { text: acc }
-                if kind == StreamKind::AgentInput =>
-            {
+            SubagentTimelineEntry::AgentMessage { text: acc } if kind == StreamKind::AgentInput => {
                 Some(acc)
             }
             _ => None,
@@ -2300,8 +2299,13 @@ impl RightPanelState {
         if self.main_mirror_open() {
             return false;
         }
-        self.subagent_list_mode
-            .unwrap_or_else(|| self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count() >= 2)
+        self.subagent_list_mode.unwrap_or_else(|| {
+            self.pty_sessions
+                .iter()
+                .filter(|s| s.is_subagent() && !s.main_mirror)
+                .count()
+                >= 2
+        })
     }
 
     /// The chronological subagent list entries: `(pty_sessions index, is
@@ -2322,7 +2326,11 @@ impl RightPanelState {
 
     /// Select the previous list row (wrapping), scrolling it into view.
     pub(crate) fn subagent_list_select_prev(&mut self) {
-        let count = self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count();
+        let count = self
+            .pty_sessions
+            .iter()
+            .filter(|s| s.is_subagent() && !s.main_mirror)
+            .count();
         if count == 0 {
             return;
         }
@@ -2334,7 +2342,11 @@ impl RightPanelState {
 
     /// Select the next list row (wrapping), scrolling it into view.
     pub(crate) fn subagent_list_select_next(&mut self) {
-        let count = self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count();
+        let count = self
+            .pty_sessions
+            .iter()
+            .filter(|s| s.is_subagent() && !s.main_mirror)
+            .count();
         if count == 0 {
             return;
         }
@@ -2507,7 +2519,11 @@ impl RightPanelState {
     /// but are never removed — the count only grows — this is a safety
     /// net for rehydration trimming).
     pub(crate) fn subagent_list_clamp(&mut self) {
-        let count = self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count();
+        let count = self
+            .pty_sessions
+            .iter()
+            .filter(|s| s.is_subagent() && !s.main_mirror)
+            .count();
         if count == 0 {
             self.subagent_list_selected = None;
             self.subagent_list_scroll = 0;
@@ -3992,12 +4008,10 @@ impl RightPanelState {
         // `subagent_call` traffic into a `/agents` pane's mirror or into
         // the main-agent mirror. Each mirror is fed exclusively through
         // its own sync (pane-index routed / `sync_main_mirror_event`).
-        !session.bound
-            && !session.main_mirror
-            && {
-                let cli = session.subagent_agent();
-                cli == Some(agent) || (agent == "internal" && cli == Some(""))
-            }
+        !session.bound && !session.main_mirror && {
+            let cli = session.subagent_agent();
+            cli == Some(agent) || (agent == "internal" && cli == Some(""))
+        }
     }
 
     pub fn update_last_pty(&mut self, output: String) {
@@ -4064,9 +4078,7 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => {
-                    matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror
-                }
+                None => matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror,
             })
         } else {
             None
@@ -4160,9 +4172,7 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => {
-                    matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror
-                }
+                None => matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror,
             })
         } else {
             None
@@ -4277,9 +4287,7 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => {
-                    matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror
-                }
+                None => matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror,
             })
         } else {
             None
@@ -4740,7 +4748,8 @@ impl RightPanelState {
                     .saturating_add(input_gap)
                     .saturating_add(body_rows)
                     .max(1);
-                self.subagent_rows_meta.push((input_rows > 0, body_rows > 0));
+                self.subagent_rows_meta
+                    .push((input_rows > 0, body_rows > 0));
                 self.subagent_rows_cache.push(rows);
             }
             // The overlay consumes both vecs with parallel iterators: a
@@ -4793,8 +4802,11 @@ impl RightPanelState {
             // body-only condition used to glue the prompt to the live
             // mini-chat for the whole stream).
             let stream_gap = u16::from(has_input && !has_body && activity_rows > 0);
-            self.subagent_rows_combined
-                .push(static_rows.saturating_add(stream_gap).saturating_add(activity_rows));
+            self.subagent_rows_combined.push(
+                static_rows
+                    .saturating_add(stream_gap)
+                    .saturating_add(activity_rows),
+            );
         }
         &self.subagent_rows_combined
     }
@@ -5147,7 +5159,10 @@ mod tests {
             "window 0 must hold call-1's report, got {body0:?}"
         );
         assert!(
-            !state.pty_sessions[0].input_echo.as_deref().is_some_and(|i| i.contains("second task"))
+            !state.pty_sessions[0]
+                .input_echo
+                .as_deref()
+                .is_some_and(|i| i.contains("second task"))
                 && !body0.contains("second task")
                 && !body0.contains("report one")
                 && !body0.contains("stream B"),
@@ -6464,9 +6479,11 @@ mod tests {
                 }),
             },
         });
-        assert!(!activity_lines(&summary_only, 60)
-            .iter()
-            .any(|l| matches!(l, SubagentActivityLine::EditDiff { .. })));
+        assert!(
+            !activity_lines(&summary_only, 60)
+                .iter()
+                .any(|l| matches!(l, SubagentActivityLine::EditDiff { .. }))
+        );
     }
 
     /// The embedded diff block is bounded by the SAME 30-row cap the chat's
@@ -6621,14 +6638,14 @@ mod tests {
         });
         let lines = activity_lines(&activity, 60);
         assert!(
-            matches!(
-                lines.last(),
-                Some(SubagentActivityLine::UserMessage { .. })
-            ),
+            matches!(lines.last(), Some(SubagentActivityLine::UserMessage { .. })),
             "the trailing user message stays last: {lines:?}"
         );
         assert_eq!(
-            lines.iter().filter(|l| matches!(l, SubagentActivityLine::Gap)).count(),
+            lines
+                .iter()
+                .filter(|l| matches!(l, SubagentActivityLine::Gap))
+                .count(),
             2,
             "one gap after the first input, one before the trailing input: {lines:?}"
         );
@@ -8319,14 +8336,10 @@ mod tests {
         );
         // The pane's close_turn froze the tool rows (none InProgress left)
         // — the mirror's marker flip adds no sealing of its own.
-        assert!(mirror
-            .subagent_activity
-            .timeline
-            .iter()
-            .all(|e| !matches!(
-                e,
-                SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress
-            )));
+        assert!(mirror.subagent_activity.timeline.iter().all(|e| !matches!(
+            e,
+            SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress
+        )));
 
         // An idle-but-bound pane re-syncs on every open WITHOUT flipping
         // its marker or re-sealing: the mirror stays Completed, the closed
@@ -8340,10 +8353,7 @@ mod tests {
             .unwrap();
         assert!(matches!(mirror.status, PtyStatus::Completed));
         assert_eq!(mirror.output, "");
-        assert_eq!(
-            state.pty_gen, gen_before,
-            "an idle re-sync churns nothing"
-        );
+        assert_eq!(state.pty_gen, gen_before, "an idle re-sync churns nothing");
 
         // A NEW turn re-engages the spinner (and only the Running status
         // changed — the closed timeline stays).
@@ -8502,7 +8512,11 @@ mod tests {
         state.start_pty("subagent: kilo".to_string(), None);
         state.panel_focus = Some(PanelFocus::Agent("kilo".into()));
         state.resolve_visible_subagents(20, 100);
-        assert_eq!(state.visible_subagents, vec![0], "the mirror outranks every normal candidate");
+        assert_eq!(
+            state.visible_subagents,
+            vec![0],
+            "the mirror outranks every normal candidate"
+        );
 
         // List exclusion: the mirror is invisible to the list builders and
         // never flips the automatic list threshold.
@@ -8540,7 +8554,9 @@ mod tests {
             Some("run the build")
         );
         state.sync_main_mirror_event(
-            &SubagentEvent::Message { text: "working".into() },
+            &SubagentEvent::Message {
+                text: "working".into(),
+            },
             true,
         );
         state.sync_main_mirror_event(
@@ -8558,14 +8574,10 @@ mod tests {
         let mirror = &state.pty_sessions[0];
         assert!(matches!(mirror.status, PtyStatus::Completed));
         assert!(
-            mirror
-                .subagent_activity
-                .timeline
-                .iter()
-                .all(|e| !matches!(
-                    e,
-                    SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress
-                )),
+            mirror.subagent_activity.timeline.iter().all(|e| !matches!(
+                e,
+                SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress
+            )),
             "closing the turn completes stuck tool rows"
         );
 
@@ -8580,7 +8592,9 @@ mod tests {
             .unwrap();
         state.pty_sessions[kilo_idx].status = PtyStatus::Running;
         let applied = state.update_subagent_activity(
-            &SubagentEvent::Message { text: "normal traffic".into() },
+            &SubagentEvent::Message {
+                text: "normal traffic".into(),
+            },
             None,
         );
         assert!(applied, "the normal window received the event");
@@ -8602,7 +8616,13 @@ mod tests {
         assert!(state.main_mirror_index().is_none());
         state.open_main_mirror_window();
         assert!(
-            state.pty_sessions.last().unwrap().subagent_activity.timeline.is_empty()
+            state
+                .pty_sessions
+                .last()
+                .unwrap()
+                .subagent_activity
+                .timeline
+                .is_empty()
                 && state.pty_sessions.last().unwrap().input_echo.is_none(),
             "the next open starts a fresh projection"
         );

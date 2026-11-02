@@ -18,8 +18,8 @@
 use super::super::App;
 use crossterm::event::KeyCode;
 
-use crate::routes::session::agent_command_map::ConfigTarget;
 use crate::component::list_dialog::FilterState;
+use crate::routes::session::agent_command_map::ConfigTarget;
 use crate::ui::dialogs::{DialogType, filter_matches};
 use cosh_tools::subagent::events::AgentConfigOption;
 
@@ -73,12 +73,7 @@ impl App {
         // against the live split, so a teardown-and-rebuild under an open
         // box can never dispatch a stale config id into a rebuilt pane
         // that merely shares the index.
-        self.agent_config_edit = Some((
-            self.agents_pane_epoch,
-            pane,
-            agent,
-            option.id.clone(),
-        ));
+        self.agent_config_edit = Some((self.agents_pane_epoch, pane, agent, option.id.clone()));
         self.dialog.replace(DialogType::AgentConfigList {
             title: Self::option_title(option),
             options: option
@@ -118,8 +113,8 @@ impl App {
         let p = split.panes.get(pane)?;
         let agent = p.agent.clone();
         let options = p.config_options.as_ref()?;
-        let option = crate::routes::session::agent_command_map::match_option(options, target)?
-            .clone();
+        let option =
+            crate::routes::session::agent_command_map::match_option(options, target)?.clone();
         Some((pane, agent, option))
     }
 
@@ -145,7 +140,9 @@ impl App {
         match key {
             KeyCode::Up => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::AgentConfigList { options, filter, .. } = &mut d.dialog_type
+                    && let DialogType::AgentConfigList {
+                        options, filter, ..
+                    } = &mut d.dialog_type
                 {
                     filter.select_prev(filter_matches(options, &filter.filter).len());
                 }
@@ -153,7 +150,9 @@ impl App {
             }
             KeyCode::Down => {
                 if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::AgentConfigList { options, filter, .. } = &mut d.dialog_type
+                    && let DialogType::AgentConfigList {
+                        options, filter, ..
+                    } = &mut d.dialog_type
                 {
                     filter.select_next(filter_matches(options, &filter.filter).len());
                 }
@@ -207,7 +206,9 @@ impl App {
             .dialog
             .current()
             .and_then(|d| match &d.dialog_type {
-                DialogType::AgentConfigList { options, filter, .. } => {
+                DialogType::AgentConfigList {
+                    options, filter, ..
+                } => {
                     // The FILTERED rows, indexed by the box's single source
                     // of truth — Enter must apply the row the search
                     // painted and the highlight sits on, not an invisible
@@ -294,10 +295,7 @@ impl App {
                 // This store is the client-side record: written ONLY here (a
                 // real user pick), read at dispatch to seed future panes.
                 // Defaults (harness, registry) never touch it.
-                if let Err(error) =
-                    self.agents_model_picks
-                        .set(&open_agent, &selection)
-                {
+                if let Err(error) = self.agents_model_picks.set(&open_agent, &selection) {
                     log::warn!("agent model pick persist failed: {error}");
                 }
             }
@@ -351,4 +349,3 @@ impl App {
         true
     }
 }
-

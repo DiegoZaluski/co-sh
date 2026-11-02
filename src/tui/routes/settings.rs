@@ -149,8 +149,7 @@ const AUTOMATION: SettingsSection = SettingsSection {
         SettingsItem {
             id: "checkup_termination",
             label: "Termination checkup",
-            description:
-                "A local model reviews ambiguous loop stops and may resume the agent (local inference per turn)",
+            description: "A local model reviews ambiguous loop stops and may resume the agent (local inference per turn)",
             kind: SettingKind::Switch(SwitchAction::Persist),
         },
         // The audit's resident model: which checkpoint the loader picks at
@@ -1229,17 +1228,13 @@ impl SettingsView {
             SettingsRow::AcpAgent(index) => Some(SettingsAction::OpenAcpFormFor {
                 index: Some(*index),
             }),
-            SettingsRow::AddAcpAgent => {
-                Some(SettingsAction::OpenAcpFormFor { index: None })
-            }
+            SettingsRow::AddAcpAgent => Some(SettingsAction::OpenAcpFormFor { index: None }),
             // A provider sub-row opens the form prefilled for editing; the
             // category and Add rows open it blank.
             SettingsRow::Provider(index) => Some(SettingsAction::OpenProviderFormFor {
                 index: Some(*index),
             }),
-            SettingsRow::AddProvider => {
-                Some(SettingsAction::OpenProviderFormFor { index: None })
-            }
+            SettingsRow::AddProvider => Some(SettingsAction::OpenProviderFormFor { index: None }),
         }
     }
 
@@ -1647,8 +1642,7 @@ impl SettingsView {
                     // description uses, and visually distinct from the
                     // ✔/✗ toggles above. The name keeps the sub-row indent
                     // (+4) shared with the other lists and "+ Add agent".
-                    let installed =
-                        cosh_tools::subagent::acp::custom_agent_installed(&entry.name);
+                    let installed = cosh_tools::subagent::acp::custom_agent_installed(&entry.name);
                     let name_color = if installed { fg } else { muted };
                     // 🗑 remove glyph hugs the box's right inner edge (the
                     // summarizer rows' controls slot); name and preview are

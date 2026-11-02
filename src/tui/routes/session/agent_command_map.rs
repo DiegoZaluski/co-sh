@@ -166,9 +166,8 @@ pub fn map_mode_to_agent(
     modes: &[cosh_tools::subagent::events::AgentSessionMode],
 ) -> Option<String> {
     let entry = MODE_MATCHES.iter().find(|m| m.mode == mode)?;
-    let normalize = |text: &str| -> String {
-        text.trim().to_lowercase().replace(['-', ' ', '.'], "_")
-    };
+    let normalize =
+        |text: &str| -> String { text.trim().to_lowercase().replace(['-', ' ', '.'], "_") };
     modes
         .iter()
         .find(|agent_mode| {
@@ -290,10 +289,13 @@ pub fn match_option(
 ) -> Option<&cosh_tools::subagent::events::AgentConfigOption> {
     match target {
         ConfigTarget::ById(id) => options.iter().find(|o| o.id == id),
-        ConfigTarget::ByCategory(category) => options
-            .iter()
-            .find(|o| o.id == category)
-            .or_else(|| options.iter().find(|o| o.category.as_deref() == Some(category))),
+        ConfigTarget::ByCategory(category) => {
+            options.iter().find(|o| o.id == category).or_else(|| {
+                options
+                    .iter()
+                    .find(|o| o.category.as_deref() == Some(category))
+            })
+        }
     }
 }
 
@@ -346,7 +348,10 @@ mod tests {
         for name in ["models", "model", "/models", "Model", "llm"] {
             let group = resolve(name).expect("models group");
             assert_eq!(group.id, "models");
-            assert!(matches!(group.target, Some(ConfigTarget::ByCategory("model"))));
+            assert!(matches!(
+                group.target,
+                Some(ConfigTarget::ByCategory("model"))
+            ));
         }
         assert_eq!(resolve("provider").unwrap().id, "provider");
         assert_eq!(resolve("PROVIDERS").unwrap().id, "provider");
@@ -440,12 +445,21 @@ mod tests {
         // The first "sentence" is itself over the cap: the cap wins (and
         // the abbreviation `.opencode/` was NOT mistaken for a terminator
         // on the way).
-        assert_eq!(line, "Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .…");
+        assert_eq!(
+            line,
+            "Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .…"
+        );
         assert!(!line.contains('\n'));
         // Multi-line briefs cut at the first line break.
-        assert_eq!(menu_description("Review changes.\nSecond paragraph."), "Review changes.");
+        assert_eq!(
+            menu_description("Review changes.\nSecond paragraph."),
+            "Review changes."
+        );
         // Exclamation/question terminators end the sentence too.
-        assert_eq!(menu_description("Set the model! Then more."), "Set the model!");
+        assert_eq!(
+            menu_description("Set the model! Then more."),
+            "Set the model!"
+        );
         // A first sentence that is itself a paragraph gets hard-capped.
         let long = "word ".repeat(60);
         let capped = menu_description(long.trim());
@@ -454,11 +468,18 @@ mod tests {
         // Empty stays empty (no invented text).
         assert_eq!(menu_description("   "), "");
         // Short one-liners pass through unchanged.
-        assert_eq!(menu_description("guided AGENTS.md setup"), "guided AGENTS.md setup");
+        assert_eq!(
+            menu_description("guided AGENTS.md setup"),
+            "guided AGENTS.md setup"
+        );
     }
 
     /// A select option shaped like the probe's mirror output.
-    fn option(id: &str, category: Option<&str>, values: &[&str]) -> cosh_tools::subagent::events::AgentConfigOption {
+    fn option(
+        id: &str,
+        category: Option<&str>,
+        values: &[&str],
+    ) -> cosh_tools::subagent::events::AgentConfigOption {
         cosh_tools::subagent::events::AgentConfigOption {
             id: id.to_string(),
             name: id.to_string(),
@@ -481,7 +502,11 @@ mod tests {
         // opencode: model + mode options only (its ACP publishes no
         // model/mode COMMANDS — issue #27942).
         let opencode = vec![
-            option("model", Some("model"), &["opencode/big-pickle", "opencode/grok-code"]),
+            option(
+                "model",
+                Some("model"),
+                &["opencode/big-pickle", "opencode/grok-code"],
+            ),
             option("mode", Some("mode"), &["build", "plan"]),
         ];
         let names: Vec<String> = synthesized_group_commands(&opencode)
@@ -519,8 +544,16 @@ mod tests {
 
         // codex: model + mode (collaboration_mode maps to no group).
         let codex = vec![
-            option("mode", Some("mode"), &["read-only", "workspace-write", "agent"]),
-            option("collaboration_mode", Some("collaboration_mode"), &["default", "plan"]),
+            option(
+                "mode",
+                Some("mode"),
+                &["read-only", "workspace-write", "agent"],
+            ),
+            option(
+                "collaboration_mode",
+                Some("collaboration_mode"),
+                &["default", "plan"],
+            ),
             option("model", Some("model"), &["gpt-6-astra"]),
         ];
         let names: Vec<String> = synthesized_group_commands(&codex)

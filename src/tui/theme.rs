@@ -107,11 +107,7 @@ impl Theme {
     /// a visible-but-whisper separation, which a transparent answer
     /// (`rgba_color` maps alpha 0 to `Color::Reset`) could never give.
     pub fn agents_pane_background(&self) -> RGBA {
-        let lift = |c: u8| {
-            (f32::from(c) + AGENTS_PANE_LIFT * 255.0)
-                .round()
-                .min(255.0) as u8
-        };
+        let lift = |c: u8| (f32::from(c) + AGENTS_PANE_LIFT * 255.0).round().min(255.0) as u8;
         let (r, g, b, _) = self.background.to_ints();
         RGBA::from_ints(lift(r), lift(g), lift(b), 255)
     }

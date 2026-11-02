@@ -85,7 +85,11 @@ impl PrefixCacheProbe {
     }
 
     /// Fingerprint one request.
-    pub(super) fn fingerprint(model: &str, system: &str, messages: &[ChatMessage]) -> RequestFingerprint {
+    pub(super) fn fingerprint(
+        model: &str,
+        system: &str,
+        messages: &[ChatMessage],
+    ) -> RequestFingerprint {
         use xxhash_rust::xxh3::xxh3_64;
         RequestFingerprint {
             model: model.to_string(),
@@ -118,9 +122,12 @@ impl PrefixCacheProbe {
             verdict = "FULL_BREAK";
             self.full_breaks += 1;
         } else {
-            let common = previous.message_hashes.len().min(fingerprint.message_hashes.len());
-            let divergence = (0..common)
-                .find(|&i| previous.message_hashes[i] != fingerprint.message_hashes[i]);
+            let common = previous
+                .message_hashes
+                .len()
+                .min(fingerprint.message_hashes.len());
+            let divergence =
+                (0..common).find(|&i| previous.message_hashes[i] != fingerprint.message_hashes[i]);
             verdict = match divergence {
                 None if fingerprint.message_hashes.len() == previous.message_hashes.len() => {
                     "identical_retry"

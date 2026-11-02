@@ -63,7 +63,9 @@ macro_rules! yolo_cwd_text {
 }
 
 macro_rules! build_full_text {
-    () => { concat!(build_base_text!(), build_self_review_text!()) };
+    () => {
+        concat!(build_base_text!(), build_self_review_text!())
+    };
 }
 
 crate::const_str_joined! {

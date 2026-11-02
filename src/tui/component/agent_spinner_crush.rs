@@ -100,7 +100,10 @@ pub struct Pcg {
 impl Pcg {
     /// `NewPCG(seed1, seed2)`.
     pub const fn new(seed1: u64, seed2: u64) -> Self {
-        Self { hi: seed1, lo: seed2 }
+        Self {
+            hi: seed1,
+            lo: seed2,
+        }
     }
 
     /// `p.next()`: state = state * mul + inc (128-bit arithmetic).
@@ -235,9 +238,15 @@ impl CfColor {
     #[allow(clippy::excessive_precision)]
     fn linear_rgb_to_xyz(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
         (
-            0.412_390_799_265_959_48 * r + 0.357_584_339_383_877_96 * g + 0.180_480_788_401_834_29 * b,
-            0.212_639_005_871_510_36 * r + 0.715_168_678_767_755_93 * g + 0.072_192_315_360_733_715 * b,
-            0.019_330_818_715_591_851 * r + 0.119_194_779_794_625_99 * g + 0.950_532_152_249_660_58 * b,
+            0.412_390_799_265_959_48 * r
+                + 0.357_584_339_383_877_96 * g
+                + 0.180_480_788_401_834_29 * b,
+            0.212_639_005_871_510_36 * r
+                + 0.715_168_678_767_755_93 * g
+                + 0.072_192_315_360_733_715 * b,
+            0.019_330_818_715_591_851 * r
+                + 0.119_194_779_794_625_99 * g
+                + 0.950_532_152_249_660_58 * b,
         )
     }
 
@@ -245,9 +254,14 @@ impl CfColor {
     #[allow(clippy::excessive_precision)]
     fn xyz_to_linear_rgb(x: f64, y: f64, z: f64) -> (f64, f64, f64) {
         (
-            3.240_969_941_904_521_4 * x - 1.537_383_177_570_093_5 * y - 0.498_610_760_293_003_28 * z,
-            -0.969_243_636_280_879_83 * x + 1.875_967_501_507_720_7 * y + 0.041_555_057_407_175_613 * z,
-            0.055_630_079_696_993_609 * x - 0.203_976_958_888_976_57 * y + 1.056_971_514_242_878_6 * z,
+            3.240_969_941_904_521_4 * x
+                - 1.537_383_177_570_093_5 * y
+                - 0.498_610_760_293_003_28 * z,
+            -0.969_243_636_280_879_83 * x
+                + 1.875_967_501_507_720_7 * y
+                + 0.041_555_057_407_175_613 * z,
+            0.055_630_079_696_993_609 * x - 0.203_976_958_888_976_57 * y
+                + 1.056_971_514_242_878_6 * z,
         )
     }
 
@@ -343,7 +357,12 @@ impl CfColor {
             h2 = h1;
         }
 
-        Self::from_hcl(interp_angle(h1, h2, t), c1 + t * (c2 - c1), l1 + t * (l2 - l1)).clamped()
+        Self::from_hcl(
+            interp_angle(h1, h2, t),
+            c1 + t * (c2 - c1),
+            l1 + t * (l2 - l1),
+        )
+        .clamped()
     }
 }
 
@@ -568,9 +587,8 @@ impl AgentSpinnerCrush {
         // Deterministic birth schedule, rebuilt only when the column count
         // changed (anim.go keeps an in-flight fade-in across SetColors).
         if self.birth_steps.len() != self.width {
-            let birth_seed = xxhash_rust::xxh3::xxh3_64(
-                format!("{INSTANCE_ID}|{cache_key}").as_bytes(),
-            );
+            let birth_seed =
+                xxhash_rust::xxh3::xxh3_64(format!("{INSTANCE_ID}|{cache_key}").as_bytes());
             let mut birth_rng = Pcg::new(birth_seed, !birth_seed);
             self.birth_steps = (0..self.width)
                 .map(|_| birth_rng.int_n(MAX_BIRTH_STEPS as usize) as u32)
@@ -703,13 +721,14 @@ impl AgentSpinnerCrush {
 
         for i in 0..self.width {
             let cell_x = x.saturating_add(i as u16);
-            if !self.initialized
-                && i < self.birth_steps.len()
-                && frames < self.birth_steps[i]
-            {
+            if !self.initialized && i < self.birth_steps.len() && frames < self.birth_steps[i] {
                 // Birth step not reached: render the initial character.
-                if let Some((ch, color)) =
-                    self.initial_frames.get(step).and_then(|f| f.get(i)).copied().flatten()
+                if let Some((ch, color)) = self
+                    .initial_frames
+                    .get(step)
+                    .and_then(|f| f.get(i))
+                    .copied()
+                    .flatten()
                 {
                     let style = Style::default().fg(rgba_color(color));
                     if let Some(cell) = buf.cell_mut((cell_x, y)) {
@@ -719,8 +738,12 @@ impl AgentSpinnerCrush {
                 }
             } else if i < self.cycling_char_width {
                 // Render a cycling character.
-                if let Some((ch, color)) =
-                    self.cycling_frames.get(step).and_then(|f| f.get(i)).copied().flatten()
+                if let Some((ch, color)) = self
+                    .cycling_frames
+                    .get(step)
+                    .and_then(|f| f.get(i))
+                    .copied()
+                    .flatten()
                 {
                     let style = Style::default().fg(rgba_color(color));
                     if let Some(cell) = buf.cell_mut((cell_x, y)) {
@@ -1127,4 +1150,3 @@ mod tests {
         assert_ne!(h, h2);
     }
 }
-

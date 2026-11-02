@@ -635,9 +635,7 @@ fn custom_provider_lookup(name: &str) -> Option<&'static ProviderConfig> {
 /// call leaves the registry untouched; configs leaked before the
 /// violation stay leaked (bounded by the call's size, unreachable from
 /// any lookup — same tolerance as the ACP agent registry).
-pub fn register_custom_providers(
-    entries: Vec<(String, String, Family)>,
-) -> Result<(), String> {
+pub fn register_custom_providers(entries: Vec<(String, String, Family)>) -> Result<(), String> {
     let mut configs: Vec<&'static ProviderConfig> = Vec::with_capacity(entries.len());
     for (name, base_url, family) in entries {
         let name = name.trim();
@@ -645,7 +643,9 @@ pub fn register_custom_providers(
             return Err("Provider name is required.".into());
         }
         if name.split_whitespace().count() != 1 {
-            return Err(format!("'{name}' must be a single word (it is the provider id the model picker and routing config use)."));
+            return Err(format!(
+                "'{name}' must be a single word (it is the provider id the model picker and routing config use)."
+            ));
         }
         if PROVIDERS
             .iter()
@@ -658,7 +658,10 @@ pub fn register_custom_providers(
         // Case-insensitive among customs too: `corp` and `CORP` would
         // otherwise both derive the same `<NAME>_API_KEY` credential and
         // silently fight over it.
-        if configs.iter().any(|cfg| cfg.name.eq_ignore_ascii_case(name)) {
+        if configs
+            .iter()
+            .any(|cfg| cfg.name.eq_ignore_ascii_case(name))
+        {
             return Err(format!("'{name}' is registered more than once."));
         }
         let url = reqwest::Url::parse(base_url.trim())
@@ -778,10 +781,12 @@ pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
         .iter()
         .find(|(key, _)| *key == provider)
         .map_or_else(
-            || if custom_provider_lookup(provider).is_some() {
-                custom_env.as_str()
-            } else {
-                "OPENAI_API_KEY"
+            || {
+                if custom_provider_lookup(provider).is_some() {
+                    custom_env.as_str()
+                } else {
+                    "OPENAI_API_KEY"
+                }
             },
             |(_, var)| *var,
         );

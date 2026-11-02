@@ -355,8 +355,7 @@ pub struct App {
     /// ask held the session permission box: parked here and re-shown the
     /// moment the worktree ask resolves, so the main loop's own permission
     /// gate is answered through the box it is waiting on (never dropped).
-    pending_permission_request:
-        Option<crate::routes::session::permission::PermissionRequest>,
+    pending_permission_request: Option<crate::routes::session::permission::PermissionRequest>,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,

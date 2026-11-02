@@ -799,7 +799,10 @@ impl ContextManager {
             .iter()
             .rposition(|item| {
                 !self.is_hidden(item)
-                    && matches!(item, ContextItem::Closure { .. } | ContextItem::Compaction { .. })
+                    && matches!(
+                        item,
+                        ContextItem::Closure { .. } | ContextItem::Compaction { .. }
+                    )
             })
             .map_or(0, |idx| idx + 1);
         let visible: Vec<&str> = self
@@ -809,7 +812,11 @@ impl ContextManager {
             .skip(cycle_start)
             .filter(|(_, item)| !self.is_hidden(item))
             .filter_map(|(_, item)| match item {
-                ContextItem::User { original, synthetic: false, .. } => Some(original.as_str()),
+                ContextItem::User {
+                    original,
+                    synthetic: false,
+                    ..
+                } => Some(original.as_str()),
                 _ => None,
             })
             .collect();
@@ -874,7 +881,9 @@ impl ContextManager {
             // normalize to None so the item stays byte-identical to a
             // reasoning-less one (no `"reasoning": ""` key in the deltas).
             // Whitespace-only reasoning normalizes the same way.
-            reasoning: reasoning.map(str::to_string).filter(|r| !r.trim().is_empty()),
+            reasoning: reasoning
+                .map(str::to_string)
+                .filter(|r| !r.trim().is_empty()),
         });
     }
 
@@ -1736,7 +1745,9 @@ impl ContextManager {
                 let (slot, size) = match it {
                     ContextItem::User { original, .. } => (0, original.len()),
                     ContextItem::Assistant { original, .. } => (1, original.len()),
-                    ContextItem::ToolCall { name, arguments, .. } => (2, name.len() + arguments.len()),
+                    ContextItem::ToolCall {
+                        name, arguments, ..
+                    } => (2, name.len() + arguments.len()),
                     ContextItem::ToolResult { content, .. } => (3, content.len()),
                     ContextItem::Closure { content, .. } => (4, content.len()),
                     ContextItem::Compaction { summary, .. } => (5, summary.len()),

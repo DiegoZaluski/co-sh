@@ -11,16 +11,13 @@
 mod windows_tests {
     use std::sync::Arc;
 
-    use cosh_sdk::extract_action::{
-        ExtractAction, NativeToolCall, StreamAction, ToolSchema,
-    };
+    use cosh_sdk::extract_action::{ExtractAction, NativeToolCall, StreamAction, ToolSchema};
     use xa11y::mock::build_provider;
     use xa11y::{App, Provider};
 
     use crate::computer::Computer;
     use crate::computer::types::{
-        ComputerWindows, WindowAction, WindowBounds, WindowInfo, WindowManageOutput,
-        WindowsResult,
+        ComputerWindows, WindowAction, WindowBounds, WindowInfo, WindowManageOutput, WindowsResult,
     };
     use crate::computer::windows::{list, manage, validate};
 
@@ -41,8 +38,7 @@ mod windows_tests {
 
     fn mock_app() -> (Arc<dyn Provider>, App) {
         let provider: Arc<dyn Provider> = build_provider();
-        let root = provider.list_apps().expect("mock exposes an app root")[0]
-            .clone();
+        let root = provider.list_apps().expect("mock exposes an app root")[0].clone();
         let app = App::from_data(Arc::clone(&provider), root.clone());
         (provider, app)
     }
@@ -64,9 +60,7 @@ mod windows_tests {
         }
     }
 
-    fn expect_managed(
-        result: Result<WindowsResult, String>,
-    ) -> Option<WindowInfo> {
+    fn expect_managed(result: Result<WindowsResult, String>) -> Option<WindowInfo> {
         let result = result.expect("windows must succeed");
         match result {
             WindowsResult::Manage(manage) => manage.window,
@@ -94,7 +88,10 @@ mod windows_tests {
             height: Some(300),
             ..input()
         };
-        assert!(validate(&resize_in).is_ok(), "resize with width/height is valid");
+        assert!(
+            validate(&resize_in).is_ok(),
+            "resize with width/height is valid"
+        );
     }
 
     #[test]
@@ -293,7 +290,11 @@ mod windows_tests {
         };
         let after_minimize = expect_managed(manage(&app, &minimized_in, WindowAction::Minimize))
             .expect("minimize re-observes the live window");
-        assert_eq!(after_minimize.minimized, Some(true), "post-observation must read the MUTATED state");
+        assert_eq!(
+            after_minimize.minimized,
+            Some(true),
+            "post-observation must read the MUTATED state"
+        );
         assert_eq!(after_minimize.maximized, Some(false));
 
         let restored_in = ComputerWindows {
@@ -318,7 +319,11 @@ mod windows_tests {
         let moved = expect_managed(manage(&app, &move_in, WindowAction::Move))
             .expect("move re-observes the live window");
         let bounds = moved.bounds.expect("the moved window keeps bounds");
-        assert_eq!((bounds.x, bounds.y), (300, 220), "the re-list must reflect the move");
+        assert_eq!(
+            (bounds.x, bounds.y),
+            (300, 220),
+            "the re-list must reflect the move"
+        );
     }
 
     #[test]
@@ -394,9 +399,15 @@ mod windows_tests {
         let (_provider, app) = mock_app();
         let result = list(&app, &input()).expect("list must succeed");
         let json = serde_json::to_string(&result).expect("serializable");
-        assert!(json.contains("\"app\":\"TestApp\""), "list serializes flat: {json}");
+        assert!(
+            json.contains("\"app\":\"TestApp\""),
+            "list serializes flat: {json}"
+        );
         // Untagged enum: no `windows`/`manage` discriminator wrapper key.
-        assert!(!json.contains("\"List\"") && !json.contains("\"Manage\""), "untagged: {json}");
+        assert!(
+            !json.contains("\"List\"") && !json.contains("\"Manage\""),
+            "untagged: {json}"
+        );
     }
 
     /// The model sees the HAND-WRITTEN schema in `description_windows` (the
@@ -409,8 +420,7 @@ mod windows_tests {
         let mut ex = ExtractAction::new();
         ex.add_tool(ToolSchema {
             name: "computer_windows".into(),
-            input_schema: Computer::new().description_windows["inputSchema"]
-                .clone(),
+            input_schema: Computer::new().description_windows["inputSchema"].clone(),
             example_args: None,
         });
         let call = NativeToolCall {
@@ -445,15 +455,14 @@ mod windows_tests {
         let mut ex = ExtractAction::new();
         ex.add_tool(ToolSchema {
             name: "computer_windows".into(),
-            input_schema: Computer::new().description_windows["inputSchema"]
-                .clone(),
+            input_schema: Computer::new().description_windows["inputSchema"].clone(),
             example_args: None,
         });
         let call = NativeToolCall {
             id: "call_w2".into(),
             name: "computer_windows".into(),
-            arguments: r#"{"name": "Reports", "action": "resize", "width": "800", "height": "600"}"#
-                .into(),
+            arguments:
+                r#"{"name": "Reports", "action": "resize", "width": "800", "height": "600"}"#.into(),
             thought_signature: String::new(),
         };
         let repaired = match ex.register_native_call(&call) {

@@ -59,7 +59,9 @@ pub fn validate(input: &ComputerWindows) -> Result<(), String> {
         return Err(format!("{TOOL}: provide `name` or `pid`"));
     }
     if input.nth == Some(0) {
-        return Err(format!("{TOOL}: `nth` is 1-based; use 1 for the first match"));
+        return Err(format!(
+            "{TOOL}: `nth` is 1-based; use 1 for the first match"
+        ));
     }
     if input.nth.is_some() && input.selector.is_none() {
         return Err(format!("{TOOL}: `nth` requires `selector`"));
@@ -251,8 +253,12 @@ pub(crate) fn manage(
             input.y.expect("validated: move carries both coordinates"),
         ),
         WindowAction::Resize => element.resize_to(
-            input.width.expect("validated: resize carries both dimensions"),
-            input.height.expect("validated: resize carries both dimensions"),
+            input
+                .width
+                .expect("validated: resize carries both dimensions"),
+            input
+                .height
+                .expect("validated: resize carries both dimensions"),
         ),
     };
     result.map_err(|e| super::errors::render(TOOL, action_name(action), &e))?;

@@ -415,7 +415,13 @@ impl SessionView {
 }
 
 impl SessionView {
-    pub(super) fn render_compaction_banner(buf: &mut Buffer, x: u16, y: u16, max_w: u16, theme: &Theme) {
+    pub(super) fn render_compaction_banner(
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        max_w: u16,
+        theme: &Theme,
+    ) {
         let line_style = Style::default().fg(rgba_color(theme.text_muted));
         let dash = '\u{2500}';
         let right = x + max_w;

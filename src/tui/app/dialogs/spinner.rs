@@ -14,8 +14,7 @@ impl App {
             .iter()
             .position(|s| s.id() == current)
             .unwrap_or(0);
-        self.dialog
-            .replace(DialogType::SpinnerList { current });
+        self.dialog.replace(DialogType::SpinnerList { current });
         if let Some(d) = self.dialog.current_mut() {
             d.selected = selected;
         }

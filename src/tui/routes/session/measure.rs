@@ -309,7 +309,11 @@ impl SessionView {
     /// `+`/`- LSP` header, plus one clipped line per finding when expanded.
     /// Must stay in sync with the notes drawn at the end of the
     /// `Part::Tool` branch in `render_parts`.
-    pub(super) fn lsp_notes_height(t: &ToolPart, tool_state: &ToolRenderState, default_expanded: bool) -> u16 {
+    pub(super) fn lsp_notes_height(
+        t: &ToolPart,
+        tool_state: &ToolRenderState,
+        default_expanded: bool,
+    ) -> u16 {
         match (&t.lsp_notes, &t.status) {
             (Some(n), ToolStatus::Completed) => {
                 let count = Self::lsp_notes_count(n);

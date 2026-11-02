@@ -108,10 +108,9 @@ impl App {
                 .as_ref()
                 .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running)
             || (self.agents_split.is_none()
-                && self
-                    .parked_agents_split
-                    .as_ref()
-                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running)))
+                && self.parked_agents_split.as_ref().is_some_and(
+                    crate::routes::session::agents_split::AgentsSplitState::any_running,
+                )))
             && self.agent_spinner.is_some();
         live = live || agent_spinner_live;
         live = live || (self.prompt_correction_active && !agent_spinner_live);
@@ -634,26 +633,21 @@ impl App {
             // MUST match `agent_spinner_active` in the mouse layout
             // (`mod.rs`): a one-row drift here skews every hit-test below
             // the prompt for the whole parked turn.
-            let agents_panes_running = self
-                .agents_split
-                .as_ref()
-                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running)
-                || (self.agents_split.is_none()
-                    && self
-                        .parked_agents_split
-                        .as_ref()
-                        .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running));
+            let agents_panes_running =
+                self.agents_split.as_ref().is_some_and(
+                    crate::routes::session::agents_split::AgentsSplitState::any_running,
+                ) || (self.agents_split.is_none()
+                    && self.parked_agents_split.as_ref().is_some_and(
+                        crate::routes::session::agents_split::AgentsSplitState::any_running,
+                    ));
             // A rehydrating pane streams its replayed history too — same
             // spinner-row contract, live or parked.
-            let agents_panes_rehydrating = self
-                .agents_split
-                .as_ref()
-                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating)
-                || (self.agents_split.is_none()
-                    && self
-                        .parked_agents_split
-                        .as_ref()
-                        .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating));
+            let agents_panes_rehydrating = self.agents_split.as_ref().is_some_and(
+                crate::routes::session::agents_split::AgentsSplitState::any_rehydrating,
+            ) || (self.agents_split.is_none()
+                && self.parked_agents_split.as_ref().is_some_and(
+                    crate::routes::session::agents_split::AgentsSplitState::any_rehydrating,
+                ));
             let agent_spinner_active = (self.state.status == crate::types::SessionStatus::Working
                 || agents_panes_running
                 || agents_panes_rehydrating)
@@ -1015,10 +1009,8 @@ impl App {
                         // triple (provider only when advertised) — empty
                         // until the first report, replaced on change.
                         // Unfocused (`None`) is the main agent: unchanged.
-                        let focused_index = self
-                            .agents_split
-                            .as_ref()
-                            .and_then(|split| split.focused);
+                        let focused_index =
+                            self.agents_split.as_ref().and_then(|split| split.focused);
                         let mut name_styles = Vec::new();
                         // The badge's inputs, resolved BEFORE the prompt's
                         // mutable borrow: the ACP harness's own report, or —

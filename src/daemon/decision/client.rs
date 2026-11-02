@@ -21,7 +21,9 @@ use crate::daemon::ipc_error::Ipc;
 
 use super::protocol::{self, DecideParams, DecideResult, Kind, code, method};
 
-use crate::harness::checkup::{Checkup, QID, TerminationDecision, TerminationVerdict, loop_questions};
+use crate::harness::checkup::{
+    Checkup, QID, TerminationDecision, TerminationVerdict, loop_questions,
+};
 
 /// A `Checkup` that decides through the shared daemon.
 pub struct IpcCheckup {

@@ -2400,7 +2400,9 @@ async fn a_mid_stream_reset_discards_the_failed_attempts_reasoning() {
 
     let items: Vec<ContextItem> = h.context_manager.items_snapshot();
     match &items[1] {
-        ContextItem::Closure { content, reasoning, .. } => {
+        ContextItem::Closure {
+            content, reasoning, ..
+        } => {
             assert_eq!(content, "good");
             assert_eq!(
                 reasoning.as_deref(),
@@ -2508,10 +2510,20 @@ async fn repetition_detection_stops_a_reasoning_only_loop() {
     // detector must stop the loop on the 3rd identical turn instead.
     let reasoning = "The provider cut the stream before any answer could be \
                      produced for this turn, so I must keep thinking.";
-    assert!(reasoning.len() >= 64, "the mock reasoning must be detectable");
+    assert!(
+        reasoning.len() >= 64,
+        "the mock reasoning must be detectable"
+    );
     let mut h = Harness::new_test()
         .with_mock_reasonings(vec![vec![reasoning]; 6])
-        .with_mock_streams(vec![Ok(vec![]), Ok(vec![]), Ok(vec![]), Ok(vec![]), Ok(vec![]), Ok(vec![])])
+        .with_mock_streams(vec![
+            Ok(vec![]),
+            Ok(vec![]),
+            Ok(vec![]),
+            Ok(vec![]),
+            Ok(vec![]),
+            Ok(vec![]),
+        ])
         .with_mock_finish_reason(Some("stop"));
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2558,7 +2570,11 @@ async fn repetition_detection_does_not_fire_on_two_identical_texts() {
                 the new API and the test suite is green.";
     assert!(text.len() >= 64, "the mock text must be detectable");
     let mut h = Harness::new_test()
-        .with_mock_streams(vec![Ok(vec![text]), Ok(vec![text]), Ok(vec!["different ending now"])])
+        .with_mock_streams(vec![
+            Ok(vec![text]),
+            Ok(vec![text]),
+            Ok(vec!["different ending now"]),
+        ])
         // One queued reason per stream; the drained queue defaults to
         // `stop`, which is exactly what the third stream needs.
         .with_mock_finish_reason(Some("length"))
@@ -2581,7 +2597,9 @@ async fn repetition_detection_does_not_fire_on_two_identical_texts() {
         "two identical texts are below the threshold — no repetition stop, events={events:?}"
     );
     assert!(
-        events.iter().any(|e| matches!(e, HarnessEvent::Done { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. })),
         "the turn must still end with Done, events={events:?}"
     );
     let items: Vec<ContextItem> = h.context_manager.items_snapshot();
@@ -2631,18 +2649,21 @@ async fn a_stream_cut_mid_tool_call_is_never_a_finished_turn() {
     // follows the dispatch (Done, or the terminal error of the drained mock
     // queue — both prove the loop kept working after the cut).
     assert!(
-        events.iter().any(|e| matches!(e, HarnessEvent::ToolCall { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ToolCall { .. })),
         "the complete retry call must be extracted and dispatched, events={events:?}"
     );
     assert!(
-        events.iter().any(|e| matches!(e, HarnessEvent::ToolResult { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ToolResult { .. })),
         "the dispatched retry call must produce a result, events={events:?}"
     );
     assert!(
-        events.iter().any(|e| matches!(
-            e,
-            HarnessEvent::Done { .. } | HarnessEvent::Error { .. }
-        )),
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Done { .. } | HarnessEvent::Error { .. })),
         "the turn must reach a terminal event after the retry, events={events:?}"
     );
 }

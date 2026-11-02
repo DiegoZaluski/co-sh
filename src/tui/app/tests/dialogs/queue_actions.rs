@@ -1060,4 +1060,3 @@ async fn deleting_next_queue_head_does_not_hold_the_chain() {
     app.pump_queued_messages();
     assert_eq!(app.queued_input.drain(), vec!["request-one".to_string()]);
 }
-

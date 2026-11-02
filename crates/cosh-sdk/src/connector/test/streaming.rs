@@ -457,7 +457,10 @@ async fn non_kimi_omits_prompt_cache_options() {
 data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
 data: [DONE]\n\n";
     for (name, make) in [
-        ("groq", Box::new(|p: u16| connector(p)) as Box<dyn Fn(u16) -> Connector>),
+        (
+            "groq",
+            Box::new(|p: u16| connector(p)) as Box<dyn Fn(u16) -> Connector>,
+        ),
         ("deepseek", Box::new(deepseek_connector)),
     ] {
         let (port, captured, _raw, handle) = mock_server(sse, 200);

@@ -143,13 +143,7 @@ fn draw_input_cursor_at(
         // Transparent style: the glyph under the caret stays visible
         // (same look as the chat prompt cursor).
         let state = cursor.current_state(now);
-        paint_cursor_cell(
-            cell,
-            state,
-            rgba_color(theme.background_element),
-            fg,
-            muted,
-        );
+        paint_cursor_cell(cell, state, rgba_color(theme.background_element), fg, muted);
     }
 }
 

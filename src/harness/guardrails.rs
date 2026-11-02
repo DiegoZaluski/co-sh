@@ -246,10 +246,7 @@ pub fn check_tool_permission(
     // (minimize/maximize/close/move/resize) — NOT read-only, so Ask mode
     // denies it outright rather than routing it to the approval dialog
     // Ask mode does not have.
-    if mode == Mode::Ask
-        && tool_name == "computer_windows"
-        && args.get("action").is_some()
-    {
+    if mode == Mode::Ask && tool_name == "computer_windows" && args.get("action").is_some() {
         return PermissionCheck::Denied(
             "`computer_windows` with `action` is not available in Ask mode \
              (it changes window state) — list the windows instead, or switch to Build mode"

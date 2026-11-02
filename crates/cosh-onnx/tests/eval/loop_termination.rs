@@ -632,8 +632,8 @@ fn completion_prefix_probe() {
         let prefixed = json!({"message": format!("All done. {}", example.message)});
         let bare_said = model
             .decide(&bare, &qs, None, None, None)
-            .unwrap_or_else(|e| panic!("decide failed (bare): {e}"))["answers"]
-            ["loop_terminated"]["choice"]
+            .unwrap_or_else(|e| panic!("decide failed (bare): {e}"))["answers"]["loop_terminated"]
+            ["choice"]
             .as_str()
             .unwrap_or("<none>")
             .to_string();
@@ -644,8 +644,7 @@ fn completion_prefix_probe() {
             .as_str()
             .unwrap_or("<none>")
             .to_string();
-        let prefixed_conf = prefixed_result["answers"]["loop_terminated"]
-            ["answer_confidence"]
+        let prefixed_conf = prefixed_result["answers"]["loop_terminated"]["answer_confidence"]
             .as_f64()
             .unwrap_or(0.0);
         total += 1;

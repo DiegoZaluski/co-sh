@@ -2,9 +2,9 @@
 //! process-lifetime keyring cache, and the local-provider registry.
 
 use super::super::{
-    clear_api_key_cache, custom_provider_names, detect_provider, forget_provider_key, get_api_key,
-    get_provider, has_api_key, invalidate_api_key, is_local_provider, known_local_providers,
-    known_providers, normalize_local_base_url, register_custom_providers, COSH_SERVICE,
+    COSH_SERVICE, clear_api_key_cache, custom_provider_names, detect_provider, forget_provider_key,
+    get_api_key, get_provider, has_api_key, invalidate_api_key, is_local_provider,
+    known_local_providers, known_providers, normalize_local_base_url, register_custom_providers,
 };
 use super::common::{ENV_LOCK, EnvGuard};
 use crate::connector::Family;
@@ -239,7 +239,9 @@ static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[tokio::test]
 async fn custom_provider_lookup_round_trip() {
     let _env = ENV_LOCK.lock().await;
-    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     register_custom_providers(vec![(
         "corp-proxy".into(),
         "https://litellm.corp:4000/v1".into(),
@@ -267,7 +269,9 @@ async fn custom_provider_lookup_round_trip() {
 /// config still wins in `get_provider`.
 #[test]
 fn custom_provider_cannot_shadow_builtin() {
-    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let err = register_custom_providers(vec![(
         "OpenAI".into(),
         "https://evil.corp/v1".into(),
@@ -276,7 +280,10 @@ fn custom_provider_cannot_shadow_builtin() {
     .expect_err("built-in collision must be rejected");
     assert!(err.contains("built-in"), "unexpected error: {err}");
     // The built-in config is untouched.
-    assert_eq!(get_provider("openai").unwrap().base_url, "https://api.openai.com/v1");
+    assert_eq!(
+        get_provider("openai").unwrap().base_url,
+        "https://api.openai.com/v1"
+    );
 
     // Duplicates among the same call are rejected too.
     let dup = register_custom_providers(vec![
@@ -301,16 +308,38 @@ fn custom_provider_cannot_shadow_builtin() {
 /// families. A rejected call must not register anything.
 #[test]
 fn custom_provider_registration_rejections() {
-    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Defensive reset: a sibling test that died mid-body (assertion panic
     // before its own reset) must not leak its registration into here.
     register_custom_providers(Vec::new()).unwrap();
     let cases = [
-        ("", "https://ok.corp/v1", Family::OpenAICompatible, "required"),
-        ("two words", "https://ok.corp/v1", Family::OpenAICompatible, "single word"),
+        (
+            "",
+            "https://ok.corp/v1",
+            Family::OpenAICompatible,
+            "required",
+        ),
+        (
+            "two words",
+            "https://ok.corp/v1",
+            Family::OpenAICompatible,
+            "single word",
+        ),
         ("no-url", "not a url", Family::OpenAICompatible, "valid url"),
-        ("bad-scheme", "ftp://files.corp", Family::OpenAICompatible, "http(s)"),
-        ("no-family", "https://ok.corp/v1", Family::Claude, "connector support"),
+        (
+            "bad-scheme",
+            "ftp://files.corp",
+            Family::OpenAICompatible,
+            "http(s)",
+        ),
+        (
+            "no-family",
+            "https://ok.corp/v1",
+            Family::Claude,
+            "connector support",
+        ),
     ];
     for (name, url, family, fragment) in cases {
         let err = register_custom_providers(vec![(name.into(), url.into(), family)])

@@ -159,7 +159,6 @@ fn all_terminal(list: &TodoList) -> bool {
         .any(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

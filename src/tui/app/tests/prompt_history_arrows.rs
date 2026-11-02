@@ -28,7 +28,8 @@ fn send(app: &mut App, key: KeyEvent) {
 }
 
 fn session_with_texts(app: &mut App, id: &str, texts: &[&str]) {
-    app.state.add_empty_session(id.to_string(), id.to_string(), 0);
+    app.state
+        .add_empty_session(id.to_string(), id.to_string(), 0);
     app.state.current_session_id = Some(id.to_string());
     let s = app.state.current_session_mut().unwrap();
     for (i, text) in texts.iter().enumerate() {

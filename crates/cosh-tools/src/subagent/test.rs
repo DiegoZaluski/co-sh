@@ -1672,9 +1672,7 @@ fn spawn_replay_fixture(
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_request: PromptRequest,
-                            responder: Responder<PromptResponse>,
-                            _cx| {
+                async move |_request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
                     prompt_log.lock().unwrap().push("PROMPT".to_string());
                     responder.respond(PromptResponse::new(
                         agent_client_protocol::schema::v1::StopReason::EndTurn,
@@ -1787,11 +1785,9 @@ async fn replay_loads_the_session_and_streams_the_history_without_prompting() {
                 status: Some(ToolCallStatus::Completed),
                 title: None,
                 raw_output: None,
-                content: super::events::extract_content_text(vec![
-                    ToolCallContent::Content(Content::new(ContentBlock::Text(
-                        TextContent::new("port=8080"),
-                    ))),
-                ]),
+                content: super::events::extract_content_text(vec![ToolCallContent::Content(
+                    Content::new(ContentBlock::Text(TextContent::new("port=8080"),))
+                ),]),
             },
             SubagentEvent::Message {
                 text: "all done".to_string(),
@@ -1871,9 +1867,7 @@ async fn run_session_drops_the_load_replay_history_from_a_live_turn() {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_request: PromptRequest,
-                            responder: Responder<PromptResponse>,
-                            cx| {
+                async move |_request: PromptRequest, responder: Responder<PromptResponse>, cx| {
                     // The LIVE turn's own work streams after the load.
                     let sid = agent_client_protocol::schema::v1::SessionId::new("fixture");
                     let _ = cx.send_notification(SessionNotification::new(
@@ -3240,8 +3234,7 @@ async fn run_session_binds_the_requested_mode_before_prompting() {
                             responder: Responder<NewSessionResponse>,
                             _cx| {
                     responder.respond(
-                        NewSessionResponse::new(SessionId::new("mode-fixture"))
-                            .modes(mode_state()),
+                        NewSessionResponse::new(SessionId::new("mode-fixture")).modes(mode_state()),
                     )
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -3315,7 +3308,10 @@ async fn run_session_binds_the_requested_mode_before_prompting() {
         ["set-mode:plan"],
         "the mapped mode must be bound through session/set_mode before prompting"
     );
-    assert_eq!(prompt_log.lock().unwrap().as_slice(), ["prompt:mode-fixture"]);
+    assert_eq!(
+        prompt_log.lock().unwrap().as_slice(),
+        ["prompt:mode-fixture"]
+    );
     // The pane-chrome Modes event leads the stream with the ADVERTISED list.
     assert!(events1.iter().any(
         |event| matches!(event, SubagentEvent::Modes { modes, current }
@@ -3349,8 +3345,7 @@ async fn run_session_binds_the_requested_mode_before_prompting() {
                             responder: Responder<NewSessionResponse>,
                             _cx| {
                     responder.respond(
-                        NewSessionResponse::new(SessionId::new("mode-fixture"))
-                            .modes(mode_state()),
+                        NewSessionResponse::new(SessionId::new("mode-fixture")).modes(mode_state()),
                     )
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -3410,7 +3405,7 @@ async fn run_session_routes_permissions_by_mode() {
     use agent_client_protocol::schema::v1::{
         AgentCapabilities, InitializeRequest, InitializeResponse, NewSessionRequest,
         NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
-        PromptRequest, PromptResponse, RequestPermissionRequest, RequestPermissionOutcome,
+        PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
         RequestPermissionResponse, SessionId, SessionUpdate, ToolCall, ToolCallUpdate,
         ToolCallUpdateFields, ToolKind,
     };
@@ -3467,11 +3462,13 @@ async fn run_session_routes_permissions_by_mode() {
                     let decision_log_agent = decision_log_agent.clone();
                     let _ = cx.send_notification(SessionNotification::new(
                         request.session_id.clone(),
-                        SessionUpdate::ToolCall(ToolCall::new(
-                            agent_client_protocol::schema::v1::ToolCallId::new("call-1"),
-                            "write the file",
-                        )
-                        .kind(ToolKind::Edit)),
+                        SessionUpdate::ToolCall(
+                            ToolCall::new(
+                                agent_client_protocol::schema::v1::ToolCallId::new("call-1"),
+                                "write the file",
+                            )
+                            .kind(ToolKind::Edit),
+                        ),
                     ));
                     let connection = cx.clone();
                     let _ = cx.spawn(async move {
@@ -3561,9 +3558,7 @@ async fn run_session_routes_permissions_by_mode() {
                         .find(|o| o.kind == "allow_always")
                         .map(|o| o.id.clone())
                         .expect("the allow-always option must be offered");
-                    let _ = answer_tx.send(
-                        super::events::PanePermissionAnswer::Selected(id),
-                    );
+                    let _ = answer_tx.send(super::events::PanePermissionAnswer::Selected(id));
                     return;
                 }
             }
@@ -3595,7 +3590,7 @@ async fn run_session_routes_permissions_by_mode() {
 #[tokio::test(flavor = "current_thread")]
 async fn run_session_authenticates_lazily_only_after_auth_required() {
     use agent_client_protocol::schema::v1::{
-        AgentCapabilities, AuthenticateRequest, AuthenticateResponse, AuthMethod, AuthMethodAgent,
+        AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
         InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
         SessionId,
     };
@@ -3634,11 +3629,7 @@ async fn run_session_authenticates_lazily_only_after_auth_required() {
                             _cx| {
                     // First `session/new` is rejected with auth_required;
                     // after the client authenticates, the retry succeeds.
-                    let first = !new_log
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|e| e.starts_with("new"));
+                    let first = !new_log.lock().unwrap().iter().any(|e| e.starts_with("new"));
                     new_log
                         .lock()
                         .unwrap()
@@ -3649,9 +3640,8 @@ async fn run_session_authenticates_lazily_only_after_auth_required() {
                             "Please log in to use the fixture",
                         ));
                     } else {
-                        let _ = responder.respond(NewSessionResponse::new(SessionId::new(
-                            "auth-fixture",
-                        )));
+                        let _ = responder
+                            .respond(NewSessionResponse::new(SessionId::new("auth-fixture")));
                     }
                     Ok(())
                 },
@@ -3675,9 +3665,9 @@ async fn run_session_authenticates_lazily_only_after_auth_required() {
                     let _ = _cx.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::AgentMessageChunk(
-                            agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
-                                TextContent::new("authenticated turn"),
-                            )),
+                            agent_client_protocol::schema::v1::ContentChunk::new(
+                                ContentBlock::Text(TextContent::new("authenticated turn")),
+                            ),
                         ),
                     ));
                     responder.respond(PromptResponse::new(

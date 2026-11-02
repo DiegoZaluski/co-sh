@@ -121,7 +121,9 @@ pub fn validate(input: &ComputerWait) -> Result<(), String> {
         return Err(format!("{TOOL}: provide `name` or `pid`"));
     }
     if input.nth == Some(0) {
-        return Err(format!("{TOOL}: `nth` is 1-based; use 1 for the first match"));
+        return Err(format!(
+            "{TOOL}: `nth` is 1-based; use 1 for the first match"
+        ));
     }
     if input.timeout_ms.is_some_and(|ms| ms > MAX_WAIT_MS) {
         return Err(format!(
@@ -337,11 +339,7 @@ fn wait_value(
                 observed,
             })
         }
-        Err(e) => Err(super::errors::render(
-            TOOL,
-            "wait for element value",
-            &e,
-        )),
+        Err(e) => Err(super::errors::render(TOOL, "wait for element value", &e)),
     }
 }
 

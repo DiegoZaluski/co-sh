@@ -8,8 +8,8 @@
 //! gates for the endpoint surfaces Bedrock's OpenAI-compatible API does not
 //! implement.
 
-use super::super::{Connector, StreamChunk, get_provider, user_message};
 use super::super::retry::is_retryable_error;
+use super::super::{Connector, StreamChunk, get_provider, user_message};
 use super::common::{ENV_LOCK, EnvGuard, mock_server};
 use tokio_stream::StreamExt;
 
@@ -182,7 +182,10 @@ async fn bedrock_streaming_tool_calls() {
     // The tools array rode the request.
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(json.get("tools").is_some(), "native mode sends tools: {json}");
+    assert!(
+        json.get("tools").is_some(),
+        "native mode sends tools: {json}"
+    );
 }
 
 /// An AWS-shaped error body (`{"__type": ..., "message": ...}`) classifies
@@ -277,7 +280,9 @@ async fn bedrock_throttling_mid_stream_is_transient() {
 /// base URL — the gate keys off the default endpoint path.
 #[tokio::test]
 async fn bedrock_list_models_gate() {
-    let c = Connector::new("bedrock").unwrap().with_api_key("aws-bearer-test");
+    let c = Connector::new("bedrock")
+        .unwrap()
+        .with_api_key("aws-bearer-test");
     let err = c.list_models().await.expect_err("runtime has no /models");
     let msg = err.to_string();
     assert!(
@@ -294,10 +299,8 @@ async fn bedrock_list_models_gate() {
 /// shared `GET /models` path.
 #[tokio::test]
 async fn bedrock_list_models_with_explicit_mantle_url() {
-    let (port, _body, raw, handle) = mock_server(
-        r#"{"data":[{"id":"openai.gpt-oss-120b-1:0"}]}"#,
-        200,
-    );
+    let (port, _body, raw, handle) =
+        mock_server(r#"{"data":[{"id":"openai.gpt-oss-120b-1:0"}]}"#, 200);
     let c = Connector::new("bedrock")
         .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}/v1"))
@@ -306,7 +309,9 @@ async fn bedrock_list_models_with_explicit_mantle_url() {
     handle.join().unwrap();
     let out = result.expect("explicit Mantle URL opts into /models");
     assert!(
-        out.models().iter().any(|m| m.id() == "openai.gpt-oss-120b-1:0"),
+        out.models()
+            .iter()
+            .any(|m| m.id() == "openai.gpt-oss-120b-1:0"),
         "the catalog must parse: {:?}",
         out.models()
     );
@@ -319,7 +324,9 @@ async fn bedrock_list_models_with_explicit_mantle_url() {
 /// base URL — the gate keys off the default endpoint path.
 #[tokio::test]
 async fn bedrock_embed_gate() {
-    let c = Connector::new("bedrock").unwrap().with_api_key("aws-bearer-test");
+    let c = Connector::new("bedrock")
+        .unwrap()
+        .with_api_key("aws-bearer-test");
     let err = c.embed("text").await.expect_err("no embedding surface");
     let msg = err.to_string();
     assert!(
@@ -332,10 +339,7 @@ async fn bedrock_embed_gate() {
 /// into the shared embedding path.
 #[tokio::test]
 async fn bedrock_embed_with_explicit_proxy_url() {
-    let (port, _body, _raw, handle) = mock_server(
-        r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#,
-        200,
-    );
+    let (port, _body, _raw, handle) = mock_server(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#, 200);
     let c = Connector::new("bedrock")
         .unwrap()
         .with_base_url(format!("http://127.0.0.1:{port}/v1"))

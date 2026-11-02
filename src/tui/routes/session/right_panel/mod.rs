@@ -862,7 +862,14 @@ fn render_subagent_list(
                     }
                 }
                 let rest: String = seg.chars().skip(token).collect();
-                draw_text(buf, &rest, x + 1 + dx, screen_y, wrap_w.saturating_sub(dx), style);
+                draw_text(
+                    buf,
+                    &rest,
+                    x + 1 + dx,
+                    screen_y,
+                    wrap_w.saturating_sub(dx),
+                    style,
+                );
             } else {
                 draw_text(buf, seg, x + 1, screen_y, wrap_w, style);
             }
@@ -1157,7 +1164,12 @@ fn render_subagent_section(
                 // rail wears the theme's secondary tone (the same tone an
                 // `agents_call` input wears in the panes — the glyph marks
                 // "input", the tone marks who spoke).
-                subagent_input_rail(buf, x, line_y, Style::default().fg(rgba_color(theme.secondary)));
+                subagent_input_rail(
+                    buf,
+                    x,
+                    line_y,
+                    Style::default().fg(rgba_color(theme.secondary)),
+                );
             }
         }
         if rebuild_regions {
@@ -1172,10 +1184,9 @@ fn render_subagent_section(
         // Whether the report body has visible content (the severity header
         // alone does not count): feeds the gap condition below, alongside
         // the live/sealed transcript rows.
-        let has_visible_body =
-            !sanitize_subagent_text(subagent_visible_body(&session.output))
-                .trim()
-                .is_empty();
+        let has_visible_body = !sanitize_subagent_text(subagent_visible_body(&session.output))
+            .trim()
+            .is_empty();
         // Live activity (Phase 3b.2): tool calls, plan, thought — the same
         // lines the height math counts (for EVERY status now). A finished
         // window keeps its SEALED transcript (`SubagentActivity::seal`)
@@ -1216,9 +1227,7 @@ fn render_subagent_section(
             accents[window],
             theme,
             text_style,
-            session
-                .subagent_agent()
-                .unwrap_or_default(),
+            session.subagent_agent().unwrap_or_default(),
             session.id.as_str(),
             subagent_spinners,
             &mut live_spinner_keys,
@@ -1642,9 +1651,7 @@ fn draw_activity_lines(
                 let rows = usize::from(subagent_diff_rows(unified, panel_w));
                 let content_key = subagent_diff_content_key(path, unified);
                 let stale = diff_cells.get(&key).is_none_or(|e| {
-                    e.wrap_w != wrap_w
-                        || e.theme_key != theme_key
-                        || e.content_key != content_key
+                    e.wrap_w != wrap_w || e.theme_key != theme_key || e.content_key != content_key
                 });
                 if stale {
                     let cells = subagent_diff_block(unified, path, panel_w, theme);
@@ -1675,17 +1682,10 @@ fn draw_activity_lines(
                     }
                     if rebuild_regions {
                         let row_cells: Vec<ratatui::buffer::Cell> = (0..panel_w)
-                            .map(|dx| {
-                                entry.cells[base + usize::from(dx)].clone()
-                            })
+                            .map(|dx| entry.cells[base + usize::from(dx)].clone())
                             .collect();
                         let trimmed = text_from_cell_row(&row_cells, panel_w as usize);
-                        regions.push(TextRegion::one_row(
-                            r,
-                            x + 2,
-                            x + wrap_w,
-                            trimmed,
-                        ));
+                        regions.push(TextRegion::one_row(r, x + 2, x + wrap_w, trimmed));
                     }
                 }
             }
@@ -2065,11 +2065,13 @@ mod tests {
             let ti = 2 * i;
             let mi = ti + 1;
             assert_eq!(
-                texts[ti], format!("pensando no passo {i} "),
+                texts[ti],
+                format!("pensando no passo {i} "),
                 "thought {i} must sit at arrival position {ti}: {texts:?}"
             );
             assert_eq!(
-                texts[mi], format!("ponto {i}; "),
+                texts[mi],
+                format!("ponto {i}; "),
                 "message {i} must sit at arrival position {mi}: {texts:?}"
             );
         }
@@ -2181,7 +2183,16 @@ mod tests {
             let rows = state.subagent_section_rows_for_display(wrap_w);
             let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
             let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
-            render_subagent_section(&mut buf, 0, 0, wrap_w + 2, natural, &mut state, &theme, false);
+            render_subagent_section(
+                &mut buf,
+                0,
+                0,
+                wrap_w + 2,
+                natural,
+                &mut state,
+                &theme,
+                false,
+            );
             let painted: Vec<String> = (0..natural)
                 .map(|y| row_text(&buf, y).trim_end().to_string())
                 .filter(|t| !t.is_empty() && !t.contains("subagent:"))
@@ -2240,7 +2251,16 @@ mod tests {
         let rows = state.subagent_section_rows_for_display(wrap_w);
         let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
         let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
-        render_subagent_section(&mut buf, 0, 0, wrap_w + 2, natural, &mut state, &theme, false);
+        render_subagent_section(
+            &mut buf,
+            0,
+            0,
+            wrap_w + 2,
+            natural,
+            &mut state,
+            &theme,
+            false,
+        );
         let content_rows: Vec<String> = (0..natural)
             .map(|y| row_text(&buf, y).trim_end().to_string())
             .filter(|t| !t.is_empty() && !t.contains("subagent:"))
@@ -2359,13 +2379,22 @@ mod tests {
             .join("\n");
         // The REAL tool name and the diff panel (hunk header + the code
         // lines with their line-number gutter).
-        assert!(all.contains("fs_edit src/main.rs"), "real tool name: {all:?}");
+        assert!(
+            all.contains("fs_edit src/main.rs"),
+            "real tool name: {all:?}"
+        );
         assert!(
             all.contains("@@ -1,2 +1,3 @@"),
             "hunk header visible: {all:?}"
         );
-        assert!(all.contains("2 +     new();"), "added line visible: {all:?}");
-        assert!(all.contains("2 -     old();"), "removed line visible: {all:?}");
+        assert!(
+            all.contains("2 +     new();"),
+            "added line visible: {all:?}"
+        );
+        assert!(
+            all.contains("2 -     old();"),
+            "removed line visible: {all:?}"
+        );
         // The window's own diff-cell cache holds the entry, keyed by the
         // session id and the tool call's timeline index.
         assert!(
@@ -2625,7 +2654,8 @@ mod tests {
             row_text(&buf, 2)
         );
         assert_ne!(
-            rail.fg, rgba_color(theme.secondary),
+            rail.fg,
+            rgba_color(theme.secondary),
             "the user echo's rail wears the AGENT's brand color, not secondary"
         );
         let answer = buf.cell((0, 3)).expect("cell");
@@ -2654,7 +2684,8 @@ mod tests {
             row_text(&buf, 2)
         );
         assert_eq!(
-            rail.fg, rgba_color(theme.secondary),
+            rail.fg,
+            rgba_color(theme.secondary),
             "an agents_call input's rail wears the secondary tone"
         );
     }
@@ -3655,8 +3686,7 @@ mod tests {
         for idx in [0usize, 1] {
             // The echo rides the DEDICATED `input_echo` field (verbatim prompt),
             // exactly like production's `set_last_subagent_input_echo`.
-            state.pty_sessions[idx + 1].input_echo =
-                Some(format!("multi-step prompt {idx} …"));
+            state.pty_sessions[idx + 1].input_echo = Some(format!("multi-step prompt {idx} …"));
         }
 
         let events1 = parsed1["events"].as_array().expect("events");
@@ -3762,9 +3792,8 @@ mod tests {
             // much part of the painted layout the estimate must match).
             let occupied = |y: u16| {
                 (0..w).any(|x| {
-                    buf.cell((x, y)).is_some_and(|c| {
-                        c.symbol() != " " || c.bg != Color::Reset
-                    })
+                    buf.cell((x, y))
+                        .is_some_and(|c| c.symbol() != " " || c.bg != Color::Reset)
                 })
             };
             let painted = (0..est).filter(|&y| occupied(y as u16)).count();
@@ -3841,8 +3870,8 @@ mod tests {
             // + gap lockstep is exercised across the whole doc spread; the
             // rest runs echo-less (no rail, no gap) like a headerless call.
             if case % 2 == 0 {
-                let echo_words = words[(next() as usize) % words.len()]
-                    .repeat((1 + next() % 6) as usize);
+                let echo_words =
+                    words[(next() as usize) % words.len()].repeat((1 + next() % 6) as usize);
                 let last = state.pty_sessions.len() - 1;
                 state.pty_sessions[last].input_echo = Some(echo_words);
             }

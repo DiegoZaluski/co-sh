@@ -5,8 +5,8 @@ use cosh_tui::core::lib::rgba::RGBA;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::style::Color;
 
-use super::{App, AppMode};
 use super::agents_dispatch::{either_split, either_split_mut};
+use super::{App, AppMode};
 use crate::component::spinner_highlight::HighlightSpinner;
 use crate::notification;
 use crate::routes::session::delete::terminated_loop_save_target;
@@ -410,9 +410,8 @@ impl App {
                             // provider and a model option under category
                             // `model`, and a flat id-or-category scan would
                             // seed the provider option's badge.
-                            let model_id =
-                                super::agents_dispatch::model_option_id(&options)
-                                    .map(str::to_string);
+                            let model_id = super::agents_dispatch::model_option_id(&options)
+                                .map(str::to_string);
                             if let Some(p) = split.panes.get(pane) {
                                 // The seed value in precedence order — the
                                 // same order `pane_turn_picks` applies: the
@@ -441,18 +440,13 @@ impl App {
                                             .map(|o| o.current.clone())
                                     })
                                     .filter(|current| !current.is_empty());
-                                let persisted = self
-                                    .agents_model_picks
-                                    .get(&p.agent)
-                                    .map(str::to_string);
+                                let persisted =
+                                    self.agents_model_picks.get(&p.agent).map(str::to_string);
                                 if let Some(seed) = pane_picked_current.or(persisted)
                                     && let Some(model_id) = model_id.as_deref()
                                     && let Some(option) =
                                         options.iter_mut().find(|o| o.id == model_id)
-                                    && option
-                                        .values
-                                        .iter()
-                                        .any(|v| v.value == seed)
+                                    && option.values.iter().any(|v| v.value == seed)
                                 {
                                     option.current = seed;
                                 }
@@ -499,9 +493,7 @@ impl App {
                             let selected = options
                                 .iter()
                                 .position(|o| o.kind == "allow_always")
-                                .or_else(|| {
-                                    options.iter().position(|o| o.kind == "allow_once")
-                                })
+                                .or_else(|| options.iter().position(|o| o.kind == "allow_once"))
                                 .unwrap_or(0);
                             split.set_pending_permission(
                                 pane,
@@ -585,7 +577,8 @@ impl App {
                     // reason from its own terminal event now, so a guard stop
                     // or a cut stream arrives as `incomplete`/`partial` and
                     // can never be mistaken for a deliberate interrupt.
-                    let end = cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::parse(&stop_reason);
+                    let end =
+                        cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::parse(&stop_reason);
                     let target =
                         either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
                     if let Some(split) = target {
@@ -2332,13 +2325,12 @@ impl App {
                             self.pending_permission_request.is_none(),
                             "a second permission request arrived while one was already held"
                         );
-                        self.pending_permission_request = Some(
-                            crate::routes::session::permission::PermissionRequest {
+                        self.pending_permission_request =
+                            Some(crate::routes::session::permission::PermissionRequest {
                                 tool,
                                 description,
                                 args,
-                            },
-                        );
+                            });
                         continue;
                     }
                     // Show the permission dialog with details from the harness
