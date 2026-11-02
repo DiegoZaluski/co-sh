@@ -1918,6 +1918,13 @@ impl App {
         if self.queue_actions_hold_active() {
             return;
         }
+        // Keyless install with the free-gateway offer pending: the offer
+        // dialog must decide first. A wake parked behind the opt-in would
+        // replay its steering through the replay path as a VISIBLE user
+        // message — the one start path the transcript-skip cannot cover.
+        if self.gateway_recommendation_offers(false).is_some() {
+            return;
+        }
         let Some(todo) = todo else {
             return;
         };

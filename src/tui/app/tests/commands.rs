@@ -2798,7 +2798,6 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
 /// previous wake (an unreconciled list must not re-wake forever).
 #[tokio::test]
 async fn a_pending_todo_wakes_the_idle_main_agent_with_the_rerun_message() {
-    use cosh::harness::core::{todo_rerun_message, todo_rerun_open_items};
     use cosh_tools::plan::types::{TodoItem, TodoList, TodoStatus};
 
     let _guard = HOME_LOCK.lock();
@@ -2827,33 +2826,36 @@ async fn a_pending_todo_wakes_the_idle_main_agent_with_the_rerun_message() {
         ],
     };
 
-    // Idle, no agent running, open items present: the wake fires with the
-    // exact shared message + the open listing.
+    // Idle, no agent running, open items present: the wake fires — and the
+    // steering goes to the MODEL ONLY: the transcript gains NO user message
+    // (a system-injected wake must not read as a user prompt).
     app.wake_main_agent_if_pending_todos(Some(&todo));
     assert_eq!(
         app.state.status,
         crate::types::SessionStatus::Working,
         "a stale open todo wakes the idle main agent"
     );
-    let wake_input = app
-        .state
-        .current_session()
-        .unwrap()
-        .messages
-        .last()
-        .unwrap()
-        .parts
-        .iter()
-        .filter_map(|p| match p {
-            crate::types::Part::Text(t) => Some(t.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let expected = todo_rerun_message(Some(&todo_rerun_open_items(&todo)));
+    assert!(
+        !app.state
+            .current_session()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.role == crate::types::MessageRole::User),
+        "the wake's steering is a system turn: nothing lands in the transcript"
+    );
+    // Observable proxies for the steering the MODEL receives: the wake
+    // consumed exactly one budget unit and recorded the open listing (the
+    // shared-words contract with the harness's natural-stop gate).
     assert_eq!(
-        wake_input, expected,
-        "the wake message IS the harness's pending-todos steering"
+        app.todo_wakes_left,
+        crate::types::TODO_WAKE_BUDGET - 1,
+        "the wake consumed one budget unit"
+    );
+    assert_eq!(
+        app.todo_wake_last_items.as_deref(),
+        Some(cosh::harness::core::todo_rerun_open_items(&todo).as_str()),
+        "the wake recorded the open listing it fired with"
     );
 
     // The wake started a loop: a second fire is refused while it runs —

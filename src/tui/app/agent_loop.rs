@@ -201,6 +201,12 @@ impl App {
         // state survives it; ANY other start (a user prompt, a queued
         // message, a wake promise) is fresh steering — it resets the budget
         // and the listing dedup, so the stale list may wake again after it.
+        // The flag ALSO marks the input as system-injected: a wake turn
+        // carries no visible prompt — the harness note goes to the MODEL
+        // only, and the transcript stays silent (the user asked to be left
+        // alone; a synthetic user bubble saying "continue" would contradict
+        // that).
+        let is_todo_wake = self.todo_wake_in_flight;
         if self.todo_wake_in_flight {
             self.todo_wake_in_flight = false;
         } else {
@@ -260,7 +266,10 @@ impl App {
             self.title_generated = false;
         }
 
-        if let Some(session) = self.state.current_session_mut() {
+        // Display transcript: the submitted prompt as a user message — a
+        // pending-todos WAKE turn is system-injected and stays OFF the
+        // transcript entirely (model-only steering; nothing to show).
+        if !is_todo_wake && let Some(session) = self.state.current_session_mut() {
             if self.telemetry.enabled() {
                 self.session_telemetry.record_message();
             }
@@ -283,7 +292,18 @@ impl App {
         // MAIN-AGENT MIRROR: echo the submitted prompt as the mirror's turn
         // input (and reset the projection bridge for the new turn). A no-op
         // while the mirror is closed or the `/agents` split is not open.
-        self.mirror_main_input(&msg);
+        // A system-injected wake turn clears the PREVIOUS turn's echo
+        // instead of echoing a prompt nobody sent — the wake's steering is
+        // model-only, and its streamed output must not sit under a stale
+        // prompt rail.
+        if is_todo_wake {
+            if self.agents_split.is_some() && self.main_mirror_open() {
+                self.state.right_panel.set_main_mirror_input_echo(None);
+                self.state.right_panel.scroll_to_bottom();
+            }
+        } else {
+            self.mirror_main_input(&msg);
+        }
 
         self.stop_signal.store(false, Ordering::Relaxed);
         self.state.status = crate::types::SessionStatus::Working;

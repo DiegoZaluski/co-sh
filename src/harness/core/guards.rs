@@ -47,16 +47,19 @@ pub fn todo_rerun_open_items(list: &TodoList) -> String {
 /// with the TUI's idle wake (`App::wake_main_agent_if_pending_todos`) so both
 /// surfaces send the SAME words — the list is the record the gate trusts, and
 /// two phrasings of the same instruction would drift apart.
+///
+/// The open items are a bookkeeping signal, NOT an unconditional order to
+/// continue: the model must judge from context. Work truly finished (or the
+/// user having taken over) means reconcile the list and stop; only real
+/// remaining work the user still wants done warrants continuing.
 pub fn todo_rerun_message(listed_open_items: Option<&str>) -> String {
     let mut message = String::from(
-        "[harness:loop-guard:pending-todos] [Harness note: your turn was about \
-         to end, but the todo list you maintain still shows open items. The \
-         harness is giving you one more turn rather than ending it here. FIRST: \
-         reconcile the list — if an item is actually done or no longer applies, \
-         mark it done/cancelled (plan_todo_write); the list is the record this \
-         gate trusts, and an accurate list is what lets the turn end cleanly. \
-         THEN: if real work remains, take the next concrete step on the first \
-         open item; if nothing remains, end with your final report.]",
+        "[System note: your todo list still shows open items, but that alone does \
+         NOT mean you must continue — judge from the context. If the work is done, \
+         or the user said they will take it from here (\"I'll adjust it myself\"), \
+         mark the items done/cancelled (plan_todo_write) and end your turn. \
+         Continue with the next open item ONLY if real work remains and the user \
+         has not asked you to stop.]",
     );
     if let Some(listed) = listed_open_items {
         message.push_str(&format!("\n\nOpen items:\n{listed}"));
@@ -182,8 +185,23 @@ impl Harness {
                  final report.]"
                     .to_string()
             }
-            ResumeCause::PendingTodos => todo_rerun_message(listed_open_items.as_deref()),
+            ResumeCause::PendingTodos => {
+                todo_rerun_message(listed_open_items.as_deref())
+            }
         };
+        if cause == ResumeCause::PendingTodos {
+            // A report-owing turn may reconcile its todo list, but it may
+            // NOT end without delivering: the requester is blocked on the
+            // report, and "the work is done" without one reads as
+            // incomplete. The wake surface (the TUI's main-agent idle
+            // wake) has no such obligation — the conditional core above
+            // is shared, this suffix is the pane-side contract.
+            steering.push_str(
+                "\n\n[This turn owes your requester a final report: reconcile \
+                 the list if you must, but do NOT end without delivering the \
+                 report.]",
+            );
+        }
         let reasoning = std::mem::take(&mut self.attempt_reasoning);
         if !reasoning.trim().is_empty() {
             #[cfg(test)]
