@@ -1642,8 +1642,13 @@ impl App {
             // pane's permission box (the bridge maps them); Yolo keeps the
             // throwaway channel (the loop auto-approves in Yolo mode
             // without ever emitting the request — but a channel that goes
-            // nowhere is the safe default either way).
-            let permission_rx = if own_mode != cosh::harness::Mode::Yolo {
+            // nowhere is the safe default either way). Manager counts as
+            // Yolo here: its guardrails auto-allow everything beyond its
+            // own deny-lists, so no request can ever be emitted.
+            let permission_rx = if !matches!(
+                own_mode,
+                cosh::harness::Mode::Yolo | cosh::harness::Mode::Manager
+            ) {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 if let Some(split) =
                     either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
@@ -1758,10 +1763,15 @@ impl App {
             // contract): a non-Yolo mode makes this turn's
             // `session/request_permission` requests surface on the pane's
             // permission box and await the user's pick; Yolo keeps the
-            // headless auto-approve. The pane state holds the ONLY sender
-            // (the box's answer reaches the turn through it); the receiver
-            // goes into the turn.
-            let permission_rx = if own_mode != cosh::harness::Mode::Yolo {
+            // headless auto-approve. Manager counts as Yolo here too: its
+            // guardrails auto-allow everything beyond its own deny-lists,
+            // so no request can ever be emitted. The pane state holds the
+            // ONLY sender (the box's answer reaches the turn through it);
+            // the receiver goes into the turn.
+            let permission_rx = if !matches!(
+                own_mode,
+                cosh::harness::Mode::Yolo | cosh::harness::Mode::Manager
+            ) {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 if let Some(split) =
                     either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)

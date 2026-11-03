@@ -103,6 +103,40 @@ fn manager_mode_allows_reading_bash_commands() {
 }
 
 #[test]
+fn manager_mode_is_permissive_like_yolo_beyond_its_deny_lists() {
+    // The manager controls agents that already run unattended (Yolo): a
+    // permission dialog would stall the orchestration with a question no
+    // one needs to answer. Everything beyond the deny-lists is auto-ALLOWED
+    // (never NeedsApproval), exactly like Yolo.
+    let commands = [
+        (
+            "bash_run",
+            serde_json::json!({ "command": "cargo test --lib" }),
+        ),
+        (
+            "bash_run",
+            serde_json::json!({ "command": "git log --oneline -5" }),
+        ),
+        ("subagent_call", serde_json::json!({ "agent": "gemini" })),
+        (
+            "computer_act",
+            serde_json::json!({ "name": "Safari", "selector": "button[name='OK']" }),
+        ),
+        (
+            "fs_rollback",
+            serde_json::json!({ "path": "src/main.rs", "hash": "abcd" }),
+        ),
+    ];
+    for (tool, args) in commands {
+        let result = check_tool_permission(tool, &args, Mode::Manager, None);
+        assert!(
+            matches!(result, PermissionCheck::Allowed),
+            "{tool} must be auto-allowed in Manager mode (no dialog), got {result:?}"
+        );
+    }
+}
+
+#[test]
 fn yolo_mode_allows_everything() {
     let args = serde_json::json!({ "command": "rm -rf /" });
     let result = check_tool_permission("bash_run", &args, Mode::Yolo, None);

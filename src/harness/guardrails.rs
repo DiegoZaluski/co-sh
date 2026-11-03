@@ -245,6 +245,9 @@ pub fn check_tool_permission(
     // registration already hides them; this is the defense-in-depth net
     // for a stale registration) and `bash_run` is fenced per-command by
     // the mode's bash blocklist — reading stays, mutating does not.
+    // Everything ELSE is permissive like Yolo (no approval dialog): the
+    // manager coordinates agents that already run unattended, so a dialog
+    // would stall the orchestration with a question no one needs to answer.
     if mode == Mode::Manager {
         if is_manager_restricted(tool_name) {
             return PermissionCheck::Denied(format!(
@@ -261,6 +264,7 @@ pub fn check_tool_permission(
                 ));
             }
         }
+        return PermissionCheck::Allowed;
     }
 
     // computer_windows (per call, not per tool): listing windows is pure
