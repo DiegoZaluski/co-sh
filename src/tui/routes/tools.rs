@@ -66,6 +66,22 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("skills_match_skills", "Match skills to task"),
         ("subagent_call", "Run a sub-agent for a delegated task"),
         (
+            "subagent_status",
+            "Check background sub-agent task status (read-only)",
+        ),
+        (
+            "agents_call",
+            "Send a message to a /agents coworker pane (block or background)",
+        ),
+        (
+            "agents_worktree",
+            "Move a /agents coworker into/out of a git worktree (User-bound: needs approval)",
+        ),
+        (
+            "agents_compact",
+            "Compact a /agents coworker's context ahead of the automatic trigger",
+        ),
+        (
             "computer_apps",
             "List desktop apps with PIDs (accessibility tree)",
         ),
