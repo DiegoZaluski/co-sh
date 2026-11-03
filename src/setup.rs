@@ -334,7 +334,7 @@ pub struct Model {
 #[serde(default)]
 pub struct Mode {
     /// Lowercase name of the last selected agent mode ("build", "ask",
-    /// "yolo", "command"). Empty → no global selection yet.
+    /// "yolo", "command", "manager"). Empty → no global selection yet.
     pub mode: String,
 }
 
@@ -1238,6 +1238,7 @@ impl Setup {
             "ask" => Some(crate::harness::Mode::Ask),
             "yolo" => Some(crate::harness::Mode::Yolo),
             "command" => Some(crate::harness::Mode::Command),
+            "manager" => Some(crate::harness::Mode::Manager),
             _ => None,
         }
     }
@@ -1252,6 +1253,7 @@ impl Setup {
             crate::harness::Mode::Ask => "ask",
             crate::harness::Mode::Yolo => "yolo",
             crate::harness::Mode::Command => "command",
+            crate::harness::Mode::Manager => "manager",
         };
         if self.mode.mode == name {
             return;

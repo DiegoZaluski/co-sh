@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::core::Mode;
+use super::core::{Mode, is_manager_blocked_bash, is_manager_restricted};
 
 /// Action the user can take in response to a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +239,28 @@ pub fn check_tool_permission(
     // Ask mode should only expose read-only tools.
     if mode == Mode::Ask && is_restricted_in_ask_mode(tool_name) {
         return PermissionCheck::Denied(format!("`{tool_name}` is not available in Ask mode"));
+    }
+
+    // Manager mode: the write/edit tools are denied outright (the tool
+    // registration already hides them; this is the defense-in-depth net
+    // for a stale registration) and `bash_run` is fenced per-command by
+    // the mode's bash blocklist — reading stays, mutating does not.
+    if mode == Mode::Manager {
+        if is_manager_restricted(tool_name) {
+            return PermissionCheck::Denied(format!(
+                "`{tool_name}` is not available in Manager mode — delegate the file work \
+                 to a sub-agent or coworker pane"
+            ));
+        }
+        if tool_name == "bash_run" {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if is_manager_blocked_bash(command) {
+                return PermissionCheck::Denied(format!(
+                    "this command writes to the filesystem and is not available in Manager \
+                     mode — use it read-only (or delegate the change), got: {command}"
+                ));
+            }
+        }
     }
 
     // computer_windows (per call, not per tool): listing windows is pure

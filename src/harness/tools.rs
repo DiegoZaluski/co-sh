@@ -832,7 +832,7 @@ fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
 /// duplicate every schema on each request. Local model servers without
 /// reliable native calling keep the schemas because the model emits inline
 /// JSON the extractor parses.
-fn write_single_tool(out: &mut String, desc: &serde_json::Value, include_schema: bool) {
+pub(crate) fn write_single_tool(out: &mut String, desc: &serde_json::Value, include_schema: bool) {
     let name = desc["name"].as_str().unwrap_or_default();
     let description = desc["description"].as_str().unwrap_or_default();
     if include_schema {

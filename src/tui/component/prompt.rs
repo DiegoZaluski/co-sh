@@ -96,6 +96,7 @@ pub(crate) fn agent_mode_color(
         cosh::harness::Mode::Ask => theme.info,
         cosh::harness::Mode::Yolo => theme.warning,
         cosh::harness::Mode::Command => theme.success,
+        cosh::harness::Mode::Manager => agent_colors.get("manager", unique_agents),
     }
 }
 
@@ -1196,6 +1197,7 @@ impl PromptView {
             cosh::harness::Mode::Ask => "ask",
             cosh::harness::Mode::Yolo => "yolo",
             cosh::harness::Mode::Command => "command",
+            cosh::harness::Mode::Manager => "manager",
         };
 
         let agent_color = agent_mode_color(theme, agent_colors, unique_agents, state.mode);

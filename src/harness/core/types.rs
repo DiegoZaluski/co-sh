@@ -25,6 +25,14 @@ pub enum Mode {
     /// them (a future feature may expose them; for now the TUI is simply a
     /// terminal and the harness loop never runs in this mode).
     Command,
+    /// Coordination mode: every tool EXCEPT the four that write/edit files
+    /// (`fs_write`, `fs_edit`, `fs_edit_lines`, `fs_ast_edit`) stays
+    /// available — `fs_rollback` included (it only restores, never rewrites)
+    /// — and `bash_run` stays exposed but denies commands that write to the
+    /// filesystem (the mode-level bash blocklist, checked at the guardrail).
+    /// Built for delegation: the manager plans with TODO, delegates the
+    /// actual file work to sub-agents and `/agents` coworkers, and observes.
+    Manager,
 }
 
 /// Result of the user-triggered `/compact`

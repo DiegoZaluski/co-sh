@@ -3,7 +3,7 @@
 
 use cosh_sdk::extract_action::{ExtractAction, Item, ToolCallData, ToolSchema};
 
-use super::{Harness, Mode, background};
+use super::{Harness, Mode, background, tool_routing::is_manager_restricted};
 
 impl Harness {
     /// Build an extractor with all registered MCP, cosh, and internal tools.
@@ -25,6 +25,11 @@ impl Harness {
                 Mode::Build | Mode::Yolo | Mode::Command => {
                     cosh.schemas_enabled(&self.disabled_tools)
                 }
+                Mode::Manager => cosh
+                    .schemas_enabled(&self.disabled_tools)
+                    .into_iter()
+                    .filter(|schema| !is_manager_restricted(&schema.name))
+                    .collect(),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
@@ -70,6 +75,11 @@ impl Harness {
                 Mode::Build | Mode::Yolo | Mode::Command => {
                     cosh.schemas_enabled(&self.disabled_tools)
                 }
+                Mode::Manager => cosh
+                    .schemas_enabled(&self.disabled_tools)
+                    .into_iter()
+                    .filter(|schema| !is_manager_restricted(&schema.name))
+                    .collect(),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {

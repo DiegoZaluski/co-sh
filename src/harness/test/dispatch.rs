@@ -1136,3 +1136,36 @@ async fn agents_compact_is_refused_from_a_pane_loop() {
         "a pane loop must never compact a sibling: {err}"
     );
 }
+
+/// Manager mode hides the file-write tools at registration: the model never
+/// even sees a schema for them (defense in depth with the guardrail denial),
+/// while every management tool — including `fs_rollback` — stays exposed.
+#[test]
+fn manager_mode_registration_hides_the_write_tools() {
+    use cosh_sdk::connector::Connector;
+    use std::collections::HashSet;
+
+    use super::super::core::Mode;
+
+    let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
+        .with_mode(Mode::Manager);
+    let names = h.effective_tool_names();
+    for tool in ["fs_write", "fs_edit", "fs_edit_lines", "fs_ast_edit"] {
+        assert!(
+            !names.contains(&tool.to_string()),
+            "{tool} must NOT be registered in Manager mode"
+        );
+    }
+    for tool in [
+        "fs_read",
+        "fs_rollback",
+        "bash_run",
+        "plan_todo_write",
+        "subagent_call",
+    ] {
+        assert!(
+            names.contains(&tool.to_string()),
+            "{tool} must stay registered in Manager mode"
+        );
+    }
+}

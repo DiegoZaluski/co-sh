@@ -1862,17 +1862,28 @@ impl App {
                         self.state.mode = match self.state.mode {
                             Mode::Build => Mode::Ask,
                             Mode::Ask => Mode::Yolo,
-                            // The Command mode is HIDDEN while the /agents
-                            // split owns the screen: the shared prompt is
-                            // intercepted there (focused pane, or the
-                            // main-agent manager loop when unfocused), so the
-                            // plain-terminal shell mode makes no sense. The
-                            // cycle wraps Yolo straight back to Build — the
-                            // other modes stay reachable for the phase after
-                            // this one.
-                            Mode::Yolo if self.agents_split.is_some() => Mode::Build,
+                            // The Command mode is HIDDEN while the session has
+                            // /agents panes at all: the shared prompt is
+                            // intercepted there (the /agents split screen when
+                            // it is open, or the main-agent manager loop that
+                            // drives those panes when it is not), so the
+                            // plain-terminal shell mode makes no sense — the
+                            // cycle offers MANAGER there instead: the mode
+                            // whose loop IS that manager loop. The condition
+                            // is the session's pane LIST, not the open split:
+                            // parked panes (mode closed) still keep the
+                            // manager loop meaningful outside the screen.
+                            Mode::Yolo
+                                if self
+                                    .state
+                                    .current_session()
+                                    .is_some_and(|s| s.agents_panes.is_some()) =>
+                            {
+                                Mode::Manager
+                            }
                             Mode::Yolo => Mode::Command,
                             Mode::Command => Mode::Build,
+                            Mode::Manager => Mode::Build,
                         };
                         // The cycled-to mode becomes the user's preference:
                         // future sessions start there instead of Build.

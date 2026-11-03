@@ -2775,10 +2775,8 @@ async fn a_cancelled_pane_report_never_wakes_the_main_agent() {
     let _ = handle;
     app.serve_agents_pane_queues();
     app.agents_split.as_mut().unwrap().set_running(0, false);
-    let requester = agent_coworkers::cancel_serving(
-        "cosh",
-        "interrupted by the user (Ctrl+X)".to_string(),
-    );
+    let requester =
+        agent_coworkers::cancel_serving("cosh", "interrupted by the user (Ctrl+X)".to_string());
     assert_eq!(requester, Some(agent_coworkers::MAIN));
     app.wake_main_agent_if_promised(requester);
 

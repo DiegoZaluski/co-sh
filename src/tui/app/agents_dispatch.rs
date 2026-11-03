@@ -1699,6 +1699,7 @@ impl App {
                             cosh::harness::core::INSTRUCTIONS_BUILD_BASE
                         }
                         cosh::harness::Mode::Yolo => cosh::harness::core::INSTRUCTIONS_YOLO_BASE,
+                        cosh::harness::Mode::Manager => cosh::harness::core::INSTRUCTIONS_MANAGER,
                         cosh::harness::Mode::Ask => cosh::harness::core::INSTRUCTIONS_ASK,
                     }),
                     anthropic_ttl_1h,

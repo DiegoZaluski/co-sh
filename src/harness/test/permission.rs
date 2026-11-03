@@ -5,6 +5,103 @@ use crate::harness::core::Mode;
 
 // Mode::Yolo
 
+// Mode::Manager
+
+#[test]
+fn manager_mode_denies_the_file_write_tools() {
+    for tool in ["fs_write", "fs_edit", "fs_edit_lines", "fs_ast_edit"] {
+        let args = serde_json::json!({ "targets": [{ "path": "src/main.rs" }] });
+        let result = check_tool_permission(tool, &args, Mode::Manager, None);
+        assert!(
+            matches!(result, PermissionCheck::Denied(_)),
+            "{tool} must be denied in Manager mode, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn manager_mode_allows_fs_rollback_and_reads() {
+    // fs_rollback only restores a previously recorded version — it is a
+    // management instrument, not a write tool.
+    let args = serde_json::json!({ "path": "src/main.rs", "hash": "abcd" });
+    let result = check_tool_permission("fs_rollback", &args, Mode::Manager, None);
+    assert!(!matches!(result, PermissionCheck::Denied(_)), "{result:?}");
+
+    let args = serde_json::json!({ "path": "src/main.rs" });
+    let result = check_tool_permission("fs_read", &args, Mode::Manager, None);
+    assert!(matches!(result, PermissionCheck::Allowed), "{result:?}");
+}
+
+#[test]
+fn manager_mode_denies_writing_bash_commands() {
+    for command in [
+        "echo hi > out.txt",
+        "cat in >> log.txt",
+        "ls 2>&1 > err.log",
+        "echo x | tee f.txt",
+        "rm src/main.rs",
+        "cp a b",
+        "mv a b",
+        "touch new.txt",
+        "mkdir dir",
+        "sed -i 's/a/b/' f.rs",
+        "sed -i.bak 's/a/b/' f.rs",
+        "git commit -m x",
+        "git push",
+        "git worktree add ../wt",
+        "cargo install foo",
+        "cargo fmt",
+        "cargo clippy --fix",
+        "npm install left-pad",
+        "make install",
+        "chmod +x run.sh",
+        "curl -o f http://x",
+        "find . | xargs rm",
+        "python -c \"open('f','w').write('x')\"",
+        "node -e \"require('fs').writeFileSync('f','x')\"",
+        "gh pr close 1",
+        "gh api --method POST repos/o/r/pulls/1/merge",
+    ] {
+        let args = serde_json::json!({ "command": command });
+        let result = check_tool_permission("bash_run", &args, Mode::Manager, None);
+        assert!(
+            matches!(result, PermissionCheck::Denied(_)),
+            "'{command}' must be blocked in Manager mode, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn manager_mode_allows_reading_bash_commands() {
+    for command in [
+        "ls",
+        "cat src/main.rs",
+        "git status",
+        "git diff HEAD",
+        "git log --oneline -5",
+        "git show abc",
+        "git stash list",
+        "gh pr view 1",
+        "gh issue list",
+        "gh run view 1",
+        "cargo test",
+        "cargo build --release",
+        "cargo clippy 2>/dev/null",
+        "npm run build",
+        "make",
+        "grep -rn 'todo' src | head",
+        "ls 2>/dev/null || true",
+        "wc -l src/*.rs",
+    ] {
+        let args = serde_json::json!({ "command": command });
+        let result = check_tool_permission("bash_run", &args, Mode::Manager, None);
+        assert!(
+            !matches!(result, PermissionCheck::Denied(_)),
+            "'{command}' must NOT be blocked in Manager mode, got {result:?}"
+        );
+    }
+}
+
 #[test]
 fn yolo_mode_allows_everything() {
     let args = serde_json::json!({ "command": "rm -rf /" });

@@ -17,6 +17,8 @@ use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome}
 use super::correction_memory::CorrectionMemory;
 use super::tools;
 use super::tools::CoshTools;
+use super::tools::Tools as _;
+use super::tools::{is_tool_disabled, write_single_tool};
 use crate::mcp::{McpConfig, McpManager};
 #[cfg(test)]
 use cosh_sdk::connector::ChatMessage;
@@ -35,6 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use tokio::time::Duration;
+pub(crate) use tool_routing::{is_manager_blocked_bash, is_manager_restricted};
 pub use types::{ManualCompactionOutcome, Mode, StreamEvent};
 
 mod types;
@@ -97,7 +100,8 @@ pub(crate) use limits::CHECKUP_VETO_BUDGET;
 use limits::{LOOP_DETECTION_WINDOW_SIZE, MAX_TOOL_RETRIES, SUBAGENT_INTERNAL_NOTE};
 pub use prompts::{
     INSTRUCTIONS_ASK, INSTRUCTIONS_BUILD, INSTRUCTIONS_BUILD_BASE, INSTRUCTIONS_BUILD_SELF_REVIEW,
-    INSTRUCTIONS_SUBAGENT, INSTRUCTIONS_YOLO, INSTRUCTIONS_YOLO_BASE, INSTRUCTIONS_YOLO_CWD,
+    INSTRUCTIONS_MANAGER, INSTRUCTIONS_SUBAGENT, INSTRUCTIONS_YOLO, INSTRUCTIONS_YOLO_BASE,
+    INSTRUCTIONS_YOLO_CWD,
 };
 
 #[allow(clippy::struct_field_names)]
@@ -411,6 +415,7 @@ impl Harness {
                 // the main repository without it).
                 Mode::Build | Mode::Command => INSTRUCTIONS_BUILD,
                 Mode::Yolo => INSTRUCTIONS_YOLO,
+                Mode::Manager => INSTRUCTIONS_MANAGER,
                 Mode::Ask => INSTRUCTIONS_ASK,
             },
         };
@@ -491,6 +496,19 @@ impl Harness {
                     &self.disabled_tools,
                     include_inline_schemas,
                 ),
+                // Manager reuses the enabled writer (a deny-list filter would
+                // duplicate the tool list) and skips the write tools inline.
+                Mode::Manager => cosh
+                    .tool_descriptions()
+                    .iter()
+                    .filter(|desc| {
+                        let name = desc["name"].as_str().unwrap_or_default();
+                        !is_tool_disabled(name, &self.disabled_tools)
+                            && !is_manager_restricted(name)
+                    })
+                    .for_each(|desc| {
+                        write_single_tool(&mut out, desc, include_inline_schemas);
+                    }),
                 Mode::Ask => cosh.write_tool_descriptions_filtered(
                     &mut out,
                     &self.disabled_tools,
