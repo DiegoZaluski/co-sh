@@ -969,10 +969,33 @@ pub fn fail_serving(coworker: &str, error: String) {
 /// tag so the caller can honor the wake promise.
 #[must_use]
 pub fn cancel_serving(coworker: &str, reason: String) -> Option<&'static str> {
-    complete_request(
+    let requester = complete_request(
         coworker,
         AgentCoworkerReport::new(Err(reason), AgentCoworkerTurnEnd::Cancelled),
-    )
+    );
+    // The USER's stop is ABSOLUTE for this coworker: the QUEUED requests that
+    // were still waiting for the pane to free up are dropped (their waiters
+    // unblock with the cancellation reason), so the freed pane can never be
+    // re-dispatched by the App's queue service in the same frame. A stop that
+    // immediately starts the next queued turn is not a stop.
+    drop_queued_requests(coworker, "the requesting turn was stopped (Ctrl+X)");
+    requester
+}
+
+/// Drop every QUEUED (not yet dispatched) request parked on `coworker`,
+/// failing each one's wait with `error`. The user's Ctrl+X stop uses this to
+/// keep the stop absolute: in-flight work is cancelled, and nothing parked
+/// behind it auto-starts a fresh turn on the pane the user just halted.
+fn drop_queued_requests(coworker: &str, error: &str) {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let dropped: Vec<String> = state
+        .queues
+        .get_mut(coworker)
+        .map(|queue| queue.drain(..).map(|request| request.id).collect())
+        .unwrap_or_default();
+    for id in dropped {
+        fail_wait(&mut state, &id, error.to_string());
+    }
 }
 
 /// Fail ALL of a coworker's outstanding requests — in-flight AND queued — and
@@ -2746,6 +2769,43 @@ mod tests {
         assert!(!has_outstanding_requests(MAIN));
     }
 
+    /// Ctrl+X is an ABSOLUTE stop: the QUEUED requests still parked on the
+    /// pane the user halted are dropped — the freed pane must never be
+    /// re-dispatched by the App's queue service with the next queued turn.
+    #[test]
+    fn cancel_serving_drops_the_pane_queue() {
+        let _g = lock();
+        set_coworkers(vec![coworker("claude", "claude", false)]);
+        // Two requests: the first dispatched (cancelled below), the second
+        // still queued behind it.
+        let first = enqueue("claude", "one", MAIN, ReplyMode::Background).unwrap();
+        let second = enqueue("claude", "two", MAIN, ReplyMode::Wait).unwrap();
+        assert!(pop_next_request("claude").is_some(), "first dispatched");
+        assert!(has_queued_request("claude"), "the second stays queued");
+        cancel_serving("claude", "interrupted by the user (Ctrl+X)".into());
+        assert!(
+            !has_queued_request("claude"),
+            "the user's stop drops the queued follow-up: no auto-redispatch"
+        );
+        assert!(
+            !has_outstanding_requests(MAIN),
+            "the dropped queue leaves nothing outstanding"
+        );
+        // The dropped waiter unblocks with the stop reason.
+        let answer = block_on(async move {
+            second
+                .receiver
+                .expect("wait mode carries a receiver")
+                .await
+                .expect("waiter alive")
+        });
+        assert_eq!(answer.end, AgentCoworkerTurnEnd::Error);
+        assert!(
+            answer.output.as_deref().unwrap_err().contains("stopped"),
+            "the queued request's waiter learns the turn was stopped: {answer:?}"
+        );
+        let _ = first;
+    }
     /// Phase 1: the worktree name rides the main agent's coworker listing next
     /// to the session state, so the agent always knows where each coworker
     /// works; a coworker without one renders exactly as before (no suffix).

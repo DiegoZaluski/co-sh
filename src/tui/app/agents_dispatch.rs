@@ -1860,11 +1860,25 @@ impl App {
         if self.state.status == crate::types::SessionStatus::Working {
             return;
         }
+        // The USER's stop is ABSOLUTE: a `Cancelled` delivery is the registry's
+        // record of a turn the user stopped (Ctrl+X) — waking the main agent
+        // with it would override the interrupt with a synthetic turn. Cancelled
+        // deliveries are consumed and DISCARDED here (not left parked: a later
+        // unrelated wake must never deliver a stale cancellation).
         let notes: Vec<String> = cosh::harness::agent_coworkers::take_ready_deliveries(
             cosh::harness::agent_coworkers::MAIN,
         )
-        .iter()
-        .map(cosh::harness::agent_coworkers::delivery_note)
+        .into_iter()
+        .filter_map(|delivery| {
+            if delivery.end == cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::Cancelled {
+                log::info!(
+                    target: "laya",
+                    "wake promise: a cancelled pane report (the user stopped the turn) is dropped, never delivered"
+                );
+                return None;
+            }
+            Some(cosh::harness::agent_coworkers::delivery_note(&delivery))
+        })
         .collect();
         if notes.is_empty() {
             // Nothing parked (a wait-mode resolution whose receiver died —

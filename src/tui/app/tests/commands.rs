@@ -2740,6 +2740,68 @@ async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
     );
 }
 
+/// A CANCELLED pane report (the USER stopped the turn with Ctrl+X) must never
+/// wake the idle main agent: the stop is absolute, and the wake would override
+/// the interrupt with a synthetic turn. The cancelled delivery is consumed and
+/// dropped, not parked for a later wake.
+#[tokio::test]
+async fn a_cancelled_pane_report_never_wakes_the_main_agent() {
+    use cosh::harness::agent_coworkers::{self, ReplyMode};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.gateway_declined = true;
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "cancelled wake".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "cosh".into(),
+        instances: 1,
+    }]);
+    app.sync_agents_pane_registry();
+
+    // The MAIN loop delegated a background task; the user Ctrl+X'd the pane.
+    // The cancellation parks as a delivery tagged MAIN — exactly what the
+    // old wake would have delivered as a synthetic turn.
+    let handle = agent_coworkers::enqueue(
+        "cosh",
+        "delegate the work",
+        agent_coworkers::MAIN,
+        ReplyMode::Background,
+    )
+    .expect("cosh pane is addressable");
+    let _ = handle;
+    app.serve_agents_pane_queues();
+    app.agents_split.as_mut().unwrap().set_running(0, false);
+    let requester = agent_coworkers::cancel_serving(
+        "cosh",
+        "interrupted by the user (Ctrl+X)".to_string(),
+    );
+    assert_eq!(requester, Some(agent_coworkers::MAIN));
+    app.wake_main_agent_if_promised(requester);
+
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Idle,
+        "a cancelled report must not wake the main agent — the user's stop stands"
+    );
+    assert!(
+        agent_coworkers::take_ready_deliveries(agent_coworkers::MAIN).is_empty(),
+        "the cancelled delivery is consumed, never parked for a later wake"
+    );
+    assert!(
+        app.state
+            .current_session()
+            .unwrap()
+            .messages
+            .iter()
+            .all(|m| m.role != crate::types::MessageRole::User),
+        "no synthetic user turn carries the cancelled report"
+    );
+}
+
 /// A MANAGER-requested pane completion (a sibling pane a manager pane
 /// delegated to — legacy shape; pane loops no longer carry the tool) must
 /// not wake the MAIN agent: the delivery belongs to the manager's drain.
