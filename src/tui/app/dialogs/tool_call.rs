@@ -7,8 +7,8 @@ impl App {
     /// Open the tool-call mode picker (`native` | `inline`).
     pub(in crate::app) fn open_tool_call_dialog(&mut self) {
         let current = match self.llm_config.tool_call_mode {
-            cosh_sdk::connector::ToolCallMode::Native => "native",
-            cosh_sdk::connector::ToolCallMode::Inline => "inline",
+            aiface::connector::ToolCallMode::Native => "native",
+            aiface::connector::ToolCallMode::Inline => "inline",
         };
         self.dialog.replace(DialogType::ToolCallList {
             current: current.to_string(),
@@ -45,9 +45,9 @@ impl App {
             KeyCode::Enter => {
                 let selected = self.dialog.current().map_or(0, |d| d.selected.min(1));
                 self.llm_config.tool_call_mode = if selected == 1 {
-                    cosh_sdk::connector::ToolCallMode::Inline
+                    aiface::connector::ToolCallMode::Inline
                 } else {
-                    cosh_sdk::connector::ToolCallMode::Native
+                    aiface::connector::ToolCallMode::Native
                 };
                 crate::routes::tools::save_tool_call_mode(
                     &mut self.setup,

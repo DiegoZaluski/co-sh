@@ -131,7 +131,7 @@ impl App {
         // those cases threw away a perfectly valid configuration (that
         // regression ignored the match arm — the cleanup must not run on
         // the failure path).
-        let provider_now_keyless = !cosh_sdk::connector::has_api_key(&provider);
+        let provider_now_keyless = !aiface::connector::has_api_key(&provider);
         if provider_now_keyless && self.setup.model.provider == provider {
             self.setup.model.provider = String::new();
             self.setup.model.model = String::new();

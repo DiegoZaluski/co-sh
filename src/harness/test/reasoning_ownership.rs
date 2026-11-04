@@ -5,7 +5,7 @@
 
 use super::super::context::ContextManager;
 use crate::harness::context::ContextItem;
-use cosh_sdk::connector::{ChatMessage, ClaudeThinkingBlock};
+use aiface::connector::{ChatMessage, ClaudeThinkingBlock};
 
 fn reasoning() -> Vec<ClaudeThinkingBlock> {
     vec![ClaudeThinkingBlock {

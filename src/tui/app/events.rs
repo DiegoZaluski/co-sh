@@ -1788,7 +1788,7 @@ impl App {
                                 let event_tx = self.event_tx.clone();
                                 self.tokio_handle.spawn(async move {
                                     let Ok(mut connector) =
-                                        cosh_sdk::connector::Connector::new(&provider)
+                                        aiface::connector::Connector::new(&provider)
                                     else {
                                         return;
                                     };
@@ -1808,7 +1808,7 @@ impl App {
                                     // it is a simple chat completion.
                                     connector = connector
                                         .with_tool_call_mode(
-                                            cosh_sdk::connector::ToolCallMode::Native,
+                                            aiface::connector::ToolCallMode::Native,
                                         )
                                         .with_retry(false);
                                     if let Some(title) =

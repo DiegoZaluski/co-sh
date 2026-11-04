@@ -1720,7 +1720,7 @@ pub(super) fn build_manual_compaction_harness(
                 if model.is_empty() || model == "auto" || provider.is_empty() {
                     return None;
                 }
-                cosh_sdk::connector::Connector::new(provider)
+                aiface::connector::Connector::new(provider)
                     .ok()
                     .map(|mut connector| {
                         connector = connector.with_model(model);
@@ -1735,7 +1735,7 @@ pub(super) fn build_manual_compaction_harness(
         return Err("Auto has no configured models.".to_string());
     } else {
         let mut connector =
-            cosh_sdk::connector::Connector::new(provider).map_err(|error| error.to_string())?;
+            aiface::connector::Connector::new(provider).map_err(|error| error.to_string())?;
         if let Some(m) = model {
             connector = connector.with_model(m);
         }

@@ -530,7 +530,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             Ok(t) => t,
             Err(e) => {
                 results.push(ReadResult {
-                    path: p.clone(),
+                    path: p.to_string(),
                     file_hash: String::new(),
                     header: String::new(),
                     content: String::new(),
@@ -568,7 +568,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             let mut content = format!("{header}\n{}", body_lines.join("\n"));
             append_content_notices(&mut content, &notices);
             results.push(ReadResult {
-                path: p.clone(),
+                path: p.to_string(),
                 file_hash: hash,
                 header: header.clone(),
                 content,

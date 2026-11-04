@@ -8,7 +8,7 @@
 //! discovery, and the split-and-concatenate contingency.
 
 use super::*;
-use cosh_sdk::connector::effective_context_window;
+use aiface::connector::effective_context_window;
 
 fn cm(max_tokens: usize) -> ContextManager {
     ContextManager::new(max_tokens)
@@ -81,7 +81,7 @@ fn tool_call_and_result_render_native_chain() {
 
 #[test]
 fn tool_call_thinking_blocks_round_trip_through_messages() {
-    use cosh_sdk::connector::ClaudeThinkingBlock;
+    use aiface::connector::ClaudeThinkingBlock;
     let mut cm = cm(10_000);
     cm.add_user("go");
     let blocks = vec![ClaudeThinkingBlock {

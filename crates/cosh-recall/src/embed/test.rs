@@ -92,13 +92,13 @@ fn local_embedder_different_models_have_different_dims() {
 }
 
 // ---------------------------------------------------------------------------
-// Embedder — cloud (remote via cosh-sdk connector)
+// Embedder — cloud (remote via aiface connector)
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "cloud")]
 #[test]
 fn cloud_embedder_create() {
-    let connector = cosh_sdk::connector::Connector::new("openai").unwrap();
+    let connector = aiface::connector::Connector::new("openai").unwrap();
     let embedder = super::Embedder::new_cloud(connector, 1536);
     assert_eq!(embedder.dim(), 1536);
 }
@@ -106,7 +106,7 @@ fn cloud_embedder_create() {
 #[cfg(feature = "cloud")]
 #[test]
 fn cloud_embedder_dim_can_be_any_value() {
-    let connector = cosh_sdk::connector::Connector::new("openai").unwrap();
+    let connector = aiface::connector::Connector::new("openai").unwrap();
     let embedder = super::Embedder::new_cloud(connector, 42);
     assert_eq!(embedder.dim(), 42);
 }
@@ -114,7 +114,7 @@ fn cloud_embedder_dim_can_be_any_value() {
 #[cfg(feature = "cloud")]
 #[test]
 fn cloud_embedder_returns_error_without_api_key() {
-    let connector = cosh_sdk::connector::Connector::new("openai").unwrap();
+    let connector = aiface::connector::Connector::new("openai").unwrap();
     let embedder = super::Embedder::new_cloud(connector, 1536);
     let result = rt().block_on(embedder.embed(&["test"]));
     assert!(result.is_err());

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::mcp::{McpConfig, McpManager};
 
-use cosh_sdk::connector::Connector;
+use aiface::connector::Connector;
 
 use crate::harness::tools::CoshTools;
 

@@ -32,7 +32,7 @@ mod test;
 mod todo_ctxt;
 
 use crate::util::TokenEncoding;
-use cosh_sdk::connector::{
+use aiface::connector::{
     ChatMessage, ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg,
     assistant_tool_call_message, discover_context_window, effective_context_window,
     tool_result_message, tool_result_message_with_images, user_message,
@@ -158,7 +158,7 @@ pub enum ContextItem {
         /// empty after a restore. Defaults for contexts persisted before
         /// this field.
         #[serde(skip)]
-        images: Vec<cosh_sdk::connector::ImageBlock>,
+        images: Vec<aiface::connector::ImageBlock>,
     },
     /// The final text response of a completed agent loop. Replaces the raw
     /// assistant text in place, carrying the draft's reasoning (the same
@@ -1022,7 +1022,7 @@ impl ContextManager {
         call_id: &str,
         content: &str,
         useless: bool,
-        images: Vec<cosh_sdk::connector::ImageBlock>,
+        images: Vec<aiface::connector::ImageBlock>,
     ) {
         let id = self.next_id();
         self.push_item(ContextItem::ToolResult {

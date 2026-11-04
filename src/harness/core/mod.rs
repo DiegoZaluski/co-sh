@@ -21,10 +21,10 @@ use super::tools::Tools as _;
 use super::tools::{is_tool_disabled, write_single_tool};
 use crate::mcp::{McpConfig, McpManager};
 #[cfg(test)]
-use cosh_sdk::connector::ChatMessage;
-use cosh_sdk::connector::{ClaudeThinkingBlock, Connector, ToolCallMode};
+use aiface::NativeToolCall;
 #[cfg(test)]
-use cosh_sdk::extract_action::NativeToolCall;
+use aiface::connector::ChatMessage;
+use aiface::connector::{ClaudeThinkingBlock, Connector, ToolCallMode};
 use cosh_sdk::extract_action::ToolCallData;
 #[cfg(test)]
 use cosh_sdk::extract_action::ToolSchema;
@@ -124,7 +124,7 @@ pub struct Harness {
     /// [`Self::push_tool_history`] when it records that dispatch's result;
     /// dropped on any other path (hook halt, stop, MCP fallback), so the
     /// bytes can never leak onto a later tool result.
-    pending_images: Vec<cosh_sdk::connector::ImageBlock>,
+    pending_images: Vec<aiface::connector::ImageBlock>,
     mode: Mode,
     /// Override for the mode-based base instructions (see
     /// [`Self::with_instructions`]). The internal sub-agent uses its own

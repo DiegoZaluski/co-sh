@@ -21,7 +21,7 @@
 use super::error::McpError;
 
 /// Keyring service shared with provider credentials.
-const SERVICE: &str = cosh_sdk::connector::COSH_SERVICE;
+const SERVICE: &str = aiface::connector::COSH_SERVICE;
 
 /// Keyring account for one MCP server's API key. A distinct `mcp:` prefix
 /// keeps MCP credentials out of the provider-key namespace (`ENV_VAR`-keyed)

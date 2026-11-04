@@ -185,9 +185,7 @@ impl Harness {
                  final report.]"
                     .to_string()
             }
-            ResumeCause::PendingTodos => {
-                todo_rerun_message(listed_open_items.as_deref())
-            }
+            ResumeCause::PendingTodos => todo_rerun_message(listed_open_items.as_deref()),
         };
         if cause == ResumeCause::PendingTodos {
             // A report-owing turn may reconcile its todo list, but it may

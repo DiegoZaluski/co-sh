@@ -1,5 +1,5 @@
 use super::super::core::{Harness, StreamEvent};
-use cosh_sdk::extract_action::NativeToolCall;
+use aiface::NativeToolCall;
 use serde_json::json;
 
 fn make_harness() -> Harness {
@@ -175,7 +175,7 @@ async fn native_mode_never_parses_text_json() {
             "fetch",
             json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }),
         )
-        .with_tool_call_mode(cosh_sdk::connector::ToolCallMode::Native)
+        .with_tool_call_mode(aiface::connector::ToolCallMode::Native)
         .with_mock_stream(Ok(vec![
             "before ",
             r#"{"name": "fetch", "arguments": {"url": "x"}}"#,
@@ -212,7 +212,7 @@ async fn inline_mode_parses_text_json() {
             "fetch",
             json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }),
         )
-        .with_tool_call_mode(cosh_sdk::connector::ToolCallMode::Inline)
+        .with_tool_call_mode(aiface::connector::ToolCallMode::Inline)
         .with_mock_stream(Ok(vec![
             "before ",
             r#"{"name": "fetch", "arguments": {"url": "x"}}"#,

@@ -1,4 +1,4 @@
-use cosh_sdk::connector::TokenUsage;
+use aiface::connector::TokenUsage;
 use cosh_tools::question::types::QuestionItem;
 use serde_json::Value;
 

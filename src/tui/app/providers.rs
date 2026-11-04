@@ -11,7 +11,7 @@ impl App {
     pub(super) fn base_url_for(&self, provider: &str) -> Option<String> {
         self.setup
             .local_base_url(provider)
-            .map(|url| cosh_sdk::connector::normalize_local_base_url(provider, url))
+            .map(|url| aiface::connector::normalize_local_base_url(provider, url))
     }
 
     /// Map of provider → base URL for every local provider the user configured
@@ -25,7 +25,7 @@ impl App {
             .map(|(provider, endpoint)| {
                 (
                     provider.clone(),
-                    cosh_sdk::connector::normalize_local_base_url(provider, &endpoint.base_url),
+                    aiface::connector::normalize_local_base_url(provider, &endpoint.base_url),
                 )
             })
             .collect()
@@ -42,21 +42,21 @@ impl App {
     /// first provider (registry order) represents the shared endpoint.
     #[must_use]
     pub(super) fn active_providers(&self) -> Vec<&'static str> {
-        use cosh_sdk::connector::{
+        use aiface::connector::{
             get_provider, is_local_provider, known_local_providers, known_providers_with_env,
         };
 
         let mut active: Vec<&'static str> = Vec::new();
         for (provider, _) in known_providers_with_env() {
-            if !is_local_provider(provider) && cosh_sdk::connector::has_api_key(provider) {
+            if !is_local_provider(provider) && aiface::connector::has_api_key(provider) {
                 active.push(provider);
             }
         }
 
         // User-registered custom providers: same credential rule as the
         // built-in cloud endpoints (keyring first, then `<NAME>_API_KEY`).
-        for provider in cosh_sdk::connector::custom_provider_names() {
-            if cosh_sdk::connector::has_api_key(provider) && !active.contains(&provider) {
+        for provider in aiface::connector::custom_provider_names() {
+            if aiface::connector::has_api_key(provider) && !active.contains(&provider) {
                 active.push(provider);
             }
         }
@@ -66,7 +66,7 @@ impl App {
         let mut endpoints: std::collections::HashSet<String> = std::collections::HashSet::new();
         for provider in known_local_providers() {
             let endpoint = if let Some(cfg) = self.setup.local_base_url(provider) {
-                cosh_sdk::connector::normalize_local_base_url(provider, cfg)
+                aiface::connector::normalize_local_base_url(provider, cfg)
             } else {
                 get_provider(provider).map_or_else(String::new, |cfg| cfg.base_url.to_string())
             };
@@ -128,18 +128,18 @@ pub(super) fn provider_has_device_login(provider: &str) -> bool {
 /// on macOS, Credential Manager on Windows). Errors are returned to the caller
 /// so it can surface them instead of failing silently.
 pub(super) fn save_provider_api_key(env_var: &str, api_key: &str) -> Result<(), keyring::Error> {
-    let entry = keyring::Entry::new(cosh_sdk::connector::COSH_SERVICE, env_var)?;
+    let entry = keyring::Entry::new(aiface::connector::COSH_SERVICE, env_var)?;
     entry.set_password(api_key)?;
     Ok(())
 }
 
 /// Whether the OS keyring currently holds a saved key for `env_var` under
-/// the cosh service. Unlike [`cosh_sdk::connector::has_api_key`] this ignores
+/// the cosh service. Unlike [`aiface::connector::has_api_key`] this ignores
 /// environment variables, so the forget/overwrite picker only appears for
 /// keys cosh itself stored — an env-var-provided key cannot be forgotten
 /// from here.
 pub(super) fn keyring_has_provider_key(env_var: &str) -> bool {
-    keyring::Entry::new(cosh_sdk::connector::COSH_SERVICE, env_var)
+    keyring::Entry::new(aiface::connector::COSH_SERVICE, env_var)
         .and_then(|entry| entry.get_password())
         .is_ok()
 }
@@ -150,7 +150,7 @@ pub(super) fn keyring_has_provider_key(env_var: &str) -> bool {
 /// forgotten must not come back as the live model — the prompt footer would
 /// advertise a provider that can no longer authenticate.
 pub(super) fn provider_has_credential(provider: &str) -> bool {
-    use cosh_sdk::connector::{has_api_key, is_local_provider};
+    use aiface::connector::{has_api_key, is_local_provider};
     is_local_provider(provider) || has_api_key(provider)
 }
 
@@ -160,9 +160,9 @@ pub(super) fn provider_has_credential(provider: &str) -> bool {
 /// touches the keyring's storage directly. The in-process key cache is
 /// invalidated too, so the removal takes effect immediately.
 pub(super) fn forget_provider_api_key(env_var: &str) -> Result<(), keyring::Error> {
-    let entry = keyring::Entry::new(cosh_sdk::connector::COSH_SERVICE, env_var)?;
+    let entry = keyring::Entry::new(aiface::connector::COSH_SERVICE, env_var)?;
     entry.delete_credential()?;
-    cosh_sdk::connector::invalidate_api_key(env_var);
+    aiface::connector::invalidate_api_key(env_var);
     Ok(())
 }
 

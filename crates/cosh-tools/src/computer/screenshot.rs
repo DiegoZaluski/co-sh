@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use cosh_sdk::connector::{ChatMessage, ImageBlock, tool_result_message_with_images};
+use aiface::connector::{ChatMessage, ImageBlock, tool_result_message_with_images};
 use xa11y::{
     Annotated, App, AppExt, Rect, Screenshot, screenshot as xa11y_screenshot, screenshot_annotated,
     screenshot_element, screenshot_region as xa11y_screenshot_region,

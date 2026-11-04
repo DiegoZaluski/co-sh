@@ -176,7 +176,7 @@ async fn failed_forget_keeps_the_persisted_model_selection() {
     // SAFETY: HOME_LOCK serializes env access across the test threads.
     unsafe { std::env::set_var(env_var, "test-key-keeps-provider-alive") };
     // The in-process cache may hold a stale MISS from earlier tests.
-    cosh_sdk::connector::invalidate_api_key(env_var);
+    aiface::connector::invalidate_api_key(env_var);
 
     // The fake keyring entry: the delete is a no-op error on any machine,
     // so `forget_provider_api_key` takes the FAILURE branch — exactly the
@@ -204,7 +204,7 @@ async fn failed_forget_keeps_the_persisted_model_selection() {
         Some(value) => unsafe { std::env::set_var(env_var, value) },
         None => unsafe { std::env::remove_var(env_var) },
     }
-    cosh_sdk::connector::invalidate_api_key(env_var);
+    aiface::connector::invalidate_api_key(env_var);
 }
 
 /// The cleanup's happy path is unchanged: when the forget REALLY leaves the

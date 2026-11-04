@@ -340,7 +340,7 @@ impl App {
         let fallbacks = if model.as_deref() == Some("auto") {
             let working = fallbacks
                 .iter()
-                .position(|fb| cosh_sdk::connector::Connector::new(&fb.provider).is_ok());
+                .position(|fb| aiface::connector::Connector::new(&fb.provider).is_ok());
             match working {
                 Some(0) | None => fallbacks,
                 Some(idx) => {

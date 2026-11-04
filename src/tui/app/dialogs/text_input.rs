@@ -918,7 +918,7 @@ impl App {
                 )
             })
             .collect();
-        if let Err(error) = cosh_sdk::connector::register_custom_providers(entries) {
+        if let Err(error) = aiface::connector::register_custom_providers(entries) {
             self.toast_form_error("Provider not saved", error);
             return false;
         }
@@ -1233,7 +1233,7 @@ impl App {
                         duration_ms: 6000,
                     });
                 } else {
-                    cosh_sdk::connector::invalidate_api_key(env_var);
+                    aiface::connector::invalidate_api_key(env_var);
                 }
                 // Invalidate model cache for this provider so the next dialog
                 // open fetches fresh models with the new key.
@@ -1474,14 +1474,14 @@ impl App {
         {
             // Purge the keyring credential too: a forgotten endpoint must
             // not leave a live secret behind (same contract as MCP).
-            if let Err(err) = cosh_sdk::connector::forget_provider_key(&name) {
+            if let Err(err) = aiface::connector::forget_provider_key(&name) {
                 log::warn!("keyring cleanup for removed provider failed: {}", err);
             }
             self.setup.save();
             // Re-publish the surviving set immediately so the removed
             // endpoint stops being offered without a restart. Lossy — the
             // same tolerance as boot.
-            if let Err(err) = cosh_sdk::connector::register_custom_providers(
+            if let Err(err) = aiface::connector::register_custom_providers(
                 self.setup
                     .custom_provider_triples()
                     .into_iter()

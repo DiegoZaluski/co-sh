@@ -5,7 +5,7 @@
 //! asynchronously (in a background task) so the agent loop is never
 //! blocked.
 
-use cosh_sdk::connector::Connector;
+use aiface::connector::Connector;
 
 /// System prompt that instructs the model to produce a short title.
 const TITLE_SYSTEM: &str = "\

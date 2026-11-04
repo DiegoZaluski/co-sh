@@ -128,13 +128,13 @@ async fn streaming_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
 
 /// A connector pointed at the local server — the production streaming path
 /// (`stream_chat_with_system_no_tools`) with no test mocks in the way.
-fn local_connector(address: std::net::SocketAddr) -> cosh_sdk::connector::Connector {
-    cosh_sdk::connector::Connector::new("openrouter")
+fn local_connector(address: std::net::SocketAddr) -> aiface::connector::Connector {
+    aiface::connector::Connector::new("openrouter")
         .unwrap()
         .with_base_url(format!("http://{address}/v1"))
         .with_api_key("test-only")
         .with_model("glm-5.3-flash")
-        .with_tool_call_mode(cosh_sdk::connector::ToolCallMode::Inline)
+        .with_tool_call_mode(aiface::connector::ToolCallMode::Inline)
 }
 
 /// PROVES the ESC-wedged loop entry: with the shared stop flag ALREADY SET,

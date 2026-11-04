@@ -1,6 +1,6 @@
 //! Exact-prefix cache diagnostics probe (zero behavioral effect).
 
-use cosh_sdk::connector::ChatMessage;
+use aiface::connector::ChatMessage;
 
 /// Fingerprint of ONE wire request: the model it was sent to, the system
 /// prompt hash and the per-message hash chain — the exact material the

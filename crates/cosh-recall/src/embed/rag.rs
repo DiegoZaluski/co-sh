@@ -33,8 +33,8 @@ impl From<fastembed::Error> for RagError {
 }
 
 #[cfg(feature = "cloud")]
-impl From<cosh_sdk::connector::ConnectorError> for RagError {
-    fn from(e: cosh_sdk::connector::ConnectorError) -> Self {
+impl From<aiface::connector::ConnectorError> for RagError {
+    fn from(e: aiface::connector::ConnectorError) -> Self {
         Self::Embedding(e.to_string())
     }
 }
@@ -48,7 +48,7 @@ impl From<cosh_sdk::connector::ConnectorError> for RagError {
 /// | Variant | Feature | Description |
 /// |---|---|---|
 /// | [`Local`][Embedder::Local] | `fastembed` | ONNX-based local embedding via fastembed-rs |
-/// | [`Cloud`][Embedder::Cloud] | `cloud` | Remote embedding via cosh-sdk connector |
+/// | [`Cloud`][Embedder::Cloud] | `cloud` | Remote embedding via aiface connector |
 ///
 /// # Feature flags
 /// - `fastembed` — enables the [`Local`][Embedder::Local] variant
@@ -82,7 +82,7 @@ pub enum Embedder {
         dim: usize,
     },
 
-    /// Remote embedding via a [`cosh_sdk::connector::Connector`].
+    /// Remote embedding via a [`aiface::connector::Connector`].
     ///
     /// Sends text to a provider API (e.g. `OpenAI`, Gemini) and returns the
     /// embedding vector.
@@ -91,7 +91,7 @@ pub enum Embedder {
     #[cfg(feature = "cloud")]
     Cloud {
         /// A configured SDK connector pointing at the embedding provider.
-        connector: cosh_sdk::connector::Connector,
+        connector: aiface::connector::Connector,
         /// Output dimension of the chosen model.
         dim: usize,
     },
@@ -131,14 +131,14 @@ impl Embedder {
     /// 768 for `text-embedding-3-large`, 384 for `text-embedding-ada-002`).
     ///
     /// The connector must be pre-configured with the correct model name and
-    /// API key (see the [`cosh-sdk`] documentation).
+    /// API key (see the [`aiface`] documentation).
     ///
     /// Requires the `cloud` feature.
     ///
-    /// [`cosh-sdk`]: https://docs.rs/cosh-sdk
+    /// [`aiface`]: https://docs.rs/aiface
     #[cfg(feature = "cloud")]
     #[must_use]
-    pub const fn new_cloud(connector: cosh_sdk::connector::Connector, dim: usize) -> Self {
+    pub const fn new_cloud(connector: aiface::connector::Connector, dim: usize) -> Self {
         Self::Cloud { connector, dim }
     }
 
@@ -197,7 +197,7 @@ impl Embedder {
 /// |---|---|
 /// | `lancedb` | Vector storage (always needed) |
 /// | `fastembed` | Local ONNX embedding |
-/// | `cloud` | Remote embedding via cosh-sdk |
+/// | `cloud` | Remote embedding via aiface |
 ///
 /// # Examples
 ///

@@ -7304,7 +7304,7 @@ fn bench_toggle_frame_decomposition() {
 #[ignore = "diagnostic probe; run explicitly in release"]
 fn bench_dashboard_summarize_per_frame() {
     use crate::usage::{UsagePeriod, summarize};
-    use cosh_sdk::connector::TokenUsage;
+    use aiface::connector::TokenUsage;
     let now_ms = 1_800_000_000_000u64;
 
     for &n in &[1_000usize, 10_000, 100_000, 500_000] {

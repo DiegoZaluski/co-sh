@@ -37,9 +37,6 @@ categories = ["command-line-utilities"]
 [dependencies.cosh-recall]
 path = "crates/cosh-recall"
 
-[dependencies.cosh-sdk]
-path = "crates/cosh-sdk"
-
 [dependencies.cosh-tools]
 path = "crates/cosh-tools"
 
@@ -79,6 +76,9 @@ required-features = ["onnx"]
 # ---
 [dependencies]
 serde_json = "1.0"
+# Unified multi-provider LLM connector (published standalone as `aiface`).
+aiface = "0.1.0"
+cosh-sdk = { path = "crates/cosh-sdk" }
 # toml = "1.1"
 chrono = "0.4"
 log = { version = "0.4", features = ["std"] }

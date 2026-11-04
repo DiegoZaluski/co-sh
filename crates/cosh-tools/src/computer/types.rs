@@ -349,7 +349,7 @@ pub struct ScreenshotOutput {
     pub saved_to: Option<String>,
     /// Inline image payload (base64 PNG) for the multimodal channel.
     #[serde(skip)]
-    pub images: Vec<cosh_sdk::connector::ImageBlock>,
+    pub images: Vec<aiface::connector::ImageBlock>,
 }
 
 /// One legend entry of an annotated capture: a box on the image plus the

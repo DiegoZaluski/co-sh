@@ -1,7 +1,7 @@
 //! Cost-tracking tests: the provider-reported REAL cost is the ONLY source
 //! of truth. Requests whose provider does not report a cost stay unpriced —
 //! no models.dev estimate is applied anymore (providers without cost
-//! reporting simply show no price; see `cosh_sdk::connector::supports_cost_reporting`).
+//! reporting simply show no price; see `aiface::connector::supports_cost_reporting`).
 
 use super::{App, HOME_LOCK, isolate_home};
 
@@ -45,7 +45,7 @@ async fn usage_event_attributed_to_loop_owner_not_viewed_session() {
     app.state.current_session_id = Some("b".into());
     app.active_loop_session_id = Some("a".into());
 
-    let usage = cosh_sdk::connector::TokenUsage {
+    let usage = aiface::connector::TokenUsage {
         input_tokens: 100,
         output_tokens: 50,
         ..Default::default()
@@ -81,7 +81,7 @@ async fn usage_event_falls_back_to_current_session_without_loop_owner() {
     app.active_loop_session_id = None;
 
     app.record_usage(
-        cosh_sdk::connector::TokenUsage::default(),
+        aiface::connector::TokenUsage::default(),
         "charm",
         "m",
         Some(0.01),
@@ -106,7 +106,7 @@ async fn usage_event_at_home_lands_on_loop_owner_not_empty() {
     app.state.current_session_id = None;
 
     app.record_usage(
-        cosh_sdk::connector::TokenUsage::default(),
+        aiface::connector::TokenUsage::default(),
         "charm",
         "m",
         Some(0.5),

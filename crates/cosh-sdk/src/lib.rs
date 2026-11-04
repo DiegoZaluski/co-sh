@@ -4,7 +4,6 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod ast;
-pub mod connector;
 pub mod extract_action;
 pub mod find;
 pub mod hashline;

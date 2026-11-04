@@ -732,7 +732,7 @@ impl App {
         // merged table. Bad entries never block startup — the registrar is
         // all-or-nothing by contract, so a single rotted entry surfaces as
         // one warning and the built-in registry keeps working.
-        if let Err(error) = cosh_sdk::connector::register_custom_providers(
+        if let Err(error) = aiface::connector::register_custom_providers(
             setup
                 .custom_provider_triples()
                 .into_iter()
@@ -844,8 +844,7 @@ impl App {
         // network; a failed refresh keeps the existing cache (validated before
         // it can replace it). Stale data beats no data.
         tokio::runtime::Handle::current().spawn(async {
-            if !cosh_sdk::connector::refresh_pricing_catalog(crate::usage::MODELS_DEV_CACHE_DIR)
-                .await
+            if !aiface::connector::refresh_pricing_catalog(crate::usage::MODELS_DEV_CACHE_DIR).await
             {
                 log::info!("models.dev catalog refresh at boot failed; keeping cached copy");
             }
@@ -1411,7 +1410,7 @@ impl App {
     /// does not report a cost the record stays `None` (unpriced) — the TUI
     /// no longer estimates spend from price tables: providers without cost
     /// reporting simply show no price (see
-    /// `cosh_sdk::connector::supports_cost_reporting`).
+    /// `aiface::connector::supports_cost_reporting`).
     fn resolve_recorded_cost(reported_cost: Option<f64>) -> Option<f64> {
         reported_cost
     }
@@ -1427,7 +1426,7 @@ impl App {
     /// the only source of truth for its own billing).
     fn record_usage(
         &mut self,
-        usage: cosh_sdk::connector::TokenUsage,
+        usage: aiface::connector::TokenUsage,
         provider: &str,
         model: &str,
         reported_cost: Option<f64>,
@@ -1539,7 +1538,7 @@ impl App {
         &mut self,
         provider: &str,
         model: &str,
-        usage: &cosh_sdk::connector::TokenUsage,
+        usage: &aiface::connector::TokenUsage,
         reported_cost: Option<f64>,
     ) {
         if self.telemetry.enabled() {

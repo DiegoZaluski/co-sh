@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::App;
+use aiface::connector::{Connector, ToolCallMode};
 use cosh::harness::{Harness, HarnessEvent};
-use cosh_sdk::connector::{Connector, ToolCallMode};
 
 use crate::fallback::PromptCorrectorFallback;
 

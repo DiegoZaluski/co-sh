@@ -14,8 +14,8 @@ use std::sync::{Mutex, OnceLock};
 use tokio::time::Duration;
 
 #[cfg(not(test))]
-use cosh_sdk::connector::discover_context_window;
-use cosh_sdk::connector::{ChatStream, Connector, ConnectorError};
+use aiface::connector::discover_context_window;
+use aiface::connector::{ChatStream, Connector, ConnectorError};
 
 #[cfg(not(test))]
 use super::context::error_catalog_window;

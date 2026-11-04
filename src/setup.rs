@@ -676,9 +676,9 @@ impl CustomProviderFamily {
     /// today; a new variant without a mapping fails the registration with
     /// a clear error instead of silently rerouting the traffic.
     #[must_use]
-    pub fn sdk_family(self) -> cosh_sdk::connector::Family {
+    pub fn sdk_family(self) -> aiface::connector::Family {
         match self {
-            Self::OpenAiCompatible => cosh_sdk::connector::Family::OpenAICompatible,
+            Self::OpenAiCompatible => aiface::connector::Family::OpenAICompatible,
         }
     }
 }

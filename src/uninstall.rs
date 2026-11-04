@@ -156,8 +156,8 @@ fn report_dry_run(reason: Option<&str>) {
     // Keyring credentials: READ-ONLY check (get_password), never delete.
     let mut stored = 0usize;
     say("  - remove these provider API keys from the OS credential store:");
-    for (provider, env_var) in cosh_sdk::connector::known_providers_with_env() {
-        let has_key = keyring::Entry::new(cosh_sdk::connector::COSH_SERVICE, env_var)
+    for (provider, env_var) in aiface::connector::known_providers_with_env() {
+        let has_key = keyring::Entry::new(aiface::connector::COSH_SERVICE, env_var)
             .ok()
             .and_then(|e| e.get_password().ok())
             .is_some();
@@ -407,8 +407,8 @@ async fn enqueue_and_flush(
 /// overall result `false` (surfaced in the uninstall summary).
 fn remove_keyring_credentials() -> bool {
     let mut failures = 0usize;
-    for (_provider, env_var) in cosh_sdk::connector::known_providers_with_env() {
-        let removed = match keyring::Entry::new(cosh_sdk::connector::COSH_SERVICE, env_var) {
+    for (_provider, env_var) in aiface::connector::known_providers_with_env() {
+        let removed = match keyring::Entry::new(aiface::connector::COSH_SERVICE, env_var) {
             Ok(entry) => match entry.delete_credential() {
                 Ok(()) => true,
                 // NoEntry is the normal case for providers whose key was

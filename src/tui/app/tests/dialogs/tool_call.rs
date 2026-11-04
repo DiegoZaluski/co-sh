@@ -131,7 +131,7 @@ async fn tool_call_dialog_mouse_click_applies_mode() {
     click_row(&mut app, 13);
     assert_eq!(
         app.llm_config.tool_call_mode,
-        cosh_sdk::connector::ToolCallMode::Inline,
+        aiface::connector::ToolCallMode::Inline,
         "clicking the inline row must apply the mode"
     );
     assert!(
@@ -144,7 +144,7 @@ async fn tool_call_dialog_mouse_click_applies_mode() {
     click_row(&mut app, 12);
     assert_eq!(
         app.llm_config.tool_call_mode,
-        cosh_sdk::connector::ToolCallMode::Native
+        aiface::connector::ToolCallMode::Native
     );
     assert!(!app.is_tool_call_dialog_visible());
 }

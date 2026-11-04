@@ -1,7 +1,7 @@
 //! Native tool registration, routing and error enrichment: wiring the
 //! connector's tool definitions and interpreting dispatch rejections.
 
-use cosh_sdk::connector::ToolDefinition;
+use aiface::connector::ToolDefinition;
 
 use super::{Harness, Mode, looks_like_argument_error};
 use crate::harness::tools::{Tools, is_tool_disabled};
@@ -262,7 +262,7 @@ const BUILD_RUNNERS: &[&str] = &[
 impl Harness {
     // Populate the connector's native tool definitions once.
     pub(super) fn init_native_tools(&mut self) {
-        use cosh_sdk::connector::ToolFunction as TFunc;
+        use aiface::connector::ToolFunction as TFunc;
 
         let mut defs: Vec<ToolDefinition> = Vec::new();
 

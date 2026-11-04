@@ -1704,7 +1704,7 @@ impl SettingsView {
                     // renders in the normal text color and one without in
                     // muted — no ✔/✗ glyph. The name keeps the sub-row
                     // indent (+4) shared with the other lists.
-                    let keyring_ready = cosh_sdk::connector::has_api_key(&entry.name);
+                    let keyring_ready = aiface::connector::has_api_key(&entry.name);
                     let name_color = if keyring_ready { fg } else { muted };
                     // 🗑 remove glyph hugs the box's right inner edge; name
                     // and preview are truncated so neither can run under it.

@@ -1,5 +1,5 @@
 use super::super::core::Harness;
-use cosh_sdk::connector::Connector;
+use aiface::connector::Connector;
 use cosh_sdk::extract_action::ToolCallData;
 use serde_json::json;
 
@@ -71,7 +71,7 @@ fn handle_harness_tool_masks_the_newest_tool_result() {
 #[test]
 fn mask_tool_call_never_consumes_the_thinking_block_stash() {
     use crate::harness::context::ContextItem;
-    use cosh_sdk::connector::ClaudeThinkingBlock;
+    use aiface::connector::ClaudeThinkingBlock;
     let mut h = make_harness();
     h.context_manager.add_user("task");
     h.context_manager.add_tool_call("c1", "fs_read", "{}");
@@ -211,7 +211,7 @@ fn inline_mode_keeps_inline_tool_format() {
     use std::collections::HashSet;
 
     use super::super::core::Harness;
-    use cosh_sdk::connector::ToolCallMode;
+    use aiface::connector::ToolCallMode;
     let connector = Connector::new("openai")
         .expect("openai provider")
         .with_tool_call_mode(ToolCallMode::Inline);
@@ -278,7 +278,7 @@ fn cloud_ask_header_omits_inline_schemas() {
 fn header_schemas_follow_tool_call_mode() {
     use std::collections::HashSet;
 
-    use cosh_sdk::connector::ToolCallMode;
+    use aiface::connector::ToolCallMode;
 
     let connector = Connector::new("ollama").expect("ollama provider");
     let mut h = Harness::new(connector, "/tmp", HashSet::new());

@@ -64,7 +64,7 @@ async fn main() {
 /// environment and/or from the keyring (service `cosh`), plus a write/read/
 /// delete roundtrip through the native store to prove end-to-end connectivity.
 fn check_keyring() {
-    use cosh_sdk::connector::{COSH_SERVICE, known_providers_with_env};
+    use aiface::connector::{COSH_SERVICE, known_providers_with_env};
     use keyring::Entry;
 
     let mut rows: Vec<(String, bool, bool)> = Vec::new();

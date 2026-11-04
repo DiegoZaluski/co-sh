@@ -22,20 +22,17 @@ pub fn save_disabled_tools(setup: &mut cosh::setup::Setup, disabled: &HashSet<St
 /// Load the persisted tool-call mode. Unknown/missing values fall back to
 /// `Native` (the default contract).
 #[must_use]
-pub fn load_tool_call_mode(setup: &cosh::setup::Setup) -> cosh_sdk::connector::ToolCallMode {
+pub fn load_tool_call_mode(setup: &cosh::setup::Setup) -> aiface::connector::ToolCallMode {
     match setup.tools.tool_call_mode.as_str() {
-        "inline" => cosh_sdk::connector::ToolCallMode::Inline,
-        _ => cosh_sdk::connector::ToolCallMode::Native,
+        "inline" => aiface::connector::ToolCallMode::Inline,
+        _ => aiface::connector::ToolCallMode::Native,
     }
 }
 
-pub fn save_tool_call_mode(
-    setup: &mut cosh::setup::Setup,
-    mode: cosh_sdk::connector::ToolCallMode,
-) {
+pub fn save_tool_call_mode(setup: &mut cosh::setup::Setup, mode: aiface::connector::ToolCallMode) {
     setup.tools.tool_call_mode = match mode {
-        cosh_sdk::connector::ToolCallMode::Native => "native".to_string(),
-        cosh_sdk::connector::ToolCallMode::Inline => "inline".to_string(),
+        aiface::connector::ToolCallMode::Native => "native".to_string(),
+        aiface::connector::ToolCallMode::Inline => "inline".to_string(),
     };
     setup.save();
 }

@@ -211,7 +211,7 @@ async fn agent_loop_end_drains_mcp_clients() {
 
 #[tokio::test]
 async fn dispatch_next_rejects_disabled_mcp_tool() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let mut disabled = HashSet::new();
     disabled.insert("off.tool".to_string());
@@ -236,7 +236,7 @@ async fn dispatch_next_rejects_disabled_mcp_tool() {
 
 #[tokio::test]
 async fn dispatch_next_hides_mcp_tools_in_ask_mode() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
         .with_mode(super::super::core::Mode::Ask);
@@ -500,7 +500,7 @@ async fn dispatch_next_keeps_external_subagent_path_with_agent() {
 fn internal_subagent_note_is_interpolated_into_the_tool_description() {
     use std::collections::HashSet;
 
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     // `Harness::new` (not the test constructor) sets the internal-sub-agent
     // note on the `subagent_call` description.
@@ -517,7 +517,7 @@ fn internal_subagent_header_hides_blocked_tools_and_uses_subagent_prompt() {
     use std::collections::HashSet;
 
     use super::super::core::{INSTRUCTIONS_SUBAGENT, Mode, SUBAGENT_BLOCKED_TOOLS};
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     // Mirror the nested harness construction: parent disabled set + the
     // sub-agent blocklist, Yolo mode, and the sub-agent instructions.
@@ -543,7 +543,7 @@ fn build_header_teaches_plan_workflow_but_ask_header_does_not() {
     use std::collections::HashSet;
 
     use super::super::core::Mode;
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     // Build mode exposes the plan tool, so the header must teach the
     // structured TODO workflow that lets the model create the full plan
@@ -575,7 +575,7 @@ fn header_notifies_when_available_tool_set_changes_between_turns() {
     use std::collections::HashSet;
 
     use super::super::core::Mode;
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     // A fresh turn never warns: there is no previous tool set to compare.
     let mut fresh = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
@@ -610,7 +610,7 @@ fn header_notifies_when_available_tool_set_changes_between_turns() {
 
 #[tokio::test]
 async fn argument_rejection_echoes_the_expected_schema_shape() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     h.push_tool_call(ToolCallData {
@@ -640,7 +640,7 @@ async fn argument_rejection_echoes_the_expected_schema_shape() {
 
 #[tokio::test]
 async fn fs_write_flat_shape_writes_one_file() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(
@@ -671,7 +671,7 @@ async fn fs_write_flat_shape_writes_one_file() {
 
 #[tokio::test]
 async fn fs_write_rejects_multi_file_batch() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(
@@ -703,7 +703,7 @@ async fn fs_write_rejects_multi_file_batch() {
 
 #[tokio::test]
 async fn fs_write_flat_without_content_is_a_parse_error_not_an_empty_write() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(
@@ -730,7 +730,7 @@ async fn fs_write_flat_without_content_is_a_parse_error_not_an_empty_write() {
 
 #[tokio::test]
 async fn fs_write_rejects_mixed_flat_and_batch_arguments() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(
@@ -763,7 +763,7 @@ async fn fs_write_rejects_mixed_flat_and_batch_arguments() {
 
 #[tokio::test]
 async fn fs_read_flat_shape_reads_one_file() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
@@ -787,7 +787,7 @@ async fn fs_read_flat_shape_reads_one_file() {
 
 #[tokio::test]
 async fn fs_read_flat_shape_supports_offset_limit() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lines.txt"), "a\nb\nc\n").unwrap();
@@ -814,7 +814,7 @@ async fn fs_read_flat_shape_supports_offset_limit() {
 
 #[tokio::test]
 async fn fs_read_legacy_line_range_still_works_but_is_not_advertised() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lines.txt"), "a\nb\nc\n").unwrap();
@@ -846,7 +846,7 @@ async fn fs_read_legacy_line_range_still_works_but_is_not_advertised() {
 
 #[tokio::test]
 async fn fs_read_offset_without_limit_reads_syntactic_block() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     let mut src = String::new();
@@ -876,7 +876,7 @@ async fn fs_read_offset_without_limit_reads_syntactic_block() {
 
 #[tokio::test]
 async fn fs_read_offset_wins_over_legacy_line_range() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("lines.txt"), "a\nb\nc\nd\ne\n").unwrap();
@@ -908,7 +908,7 @@ async fn fs_read_offset_wins_over_legacy_line_range() {
 
 #[tokio::test]
 async fn fs_read_rejects_multi_target_batch() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     let mut h = Harness::new(
@@ -936,7 +936,7 @@ async fn fs_read_rejects_multi_target_batch() {
 
 #[tokio::test]
 async fn fs_read_rejects_mixed_flat_and_batch_arguments() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("flat.txt"), "flat\n").unwrap();
@@ -964,7 +964,7 @@ async fn fs_read_rejects_mixed_flat_and_batch_arguments() {
 
 #[tokio::test]
 async fn fs_read_empty_arguments_fail_instead_of_reading_nothing() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     h.push_tool_call(ToolCallData {
@@ -982,7 +982,7 @@ async fn fs_read_empty_arguments_fail_instead_of_reading_nothing() {
 
 #[tokio::test]
 async fn runtime_failure_is_not_schema_enriched() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     h.push_tool_call(ToolCallData {
@@ -1033,7 +1033,7 @@ async fn unknown_tool_error_echoes_the_available_tool_set() {
 
 #[test]
 fn handoff_summary_referencing_removed_tool_gets_a_notice() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let summary = "## Next Move\n1. Call `plan_removed_cross_off` to cross off the task.";
@@ -1050,7 +1050,7 @@ fn handoff_summary_referencing_removed_tool_gets_a_notice() {
 
 #[test]
 fn handoff_summary_referencing_current_tools_stays_untouched() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let summary = "## Next Move\n1. Use `fs_edit` with the ops DSL, then `bash_run` cargo test. \
@@ -1064,7 +1064,7 @@ fn handoff_summary_referencing_current_tools_stays_untouched() {
 
 #[test]
 fn handoff_notice_lists_each_stale_tool_once() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
 
     let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let summary = "plan_todo_removed_helper then plan_old_cross_off, again plan_todo_removed_helper. \
@@ -1142,7 +1142,7 @@ async fn agents_compact_is_refused_from_a_pane_loop() {
 /// while every management tool — including `fs_rollback` — stays exposed.
 #[test]
 fn manager_mode_registration_hides_the_write_tools() {
-    use cosh_sdk::connector::Connector;
+    use aiface::connector::Connector;
     use std::collections::HashSet;
 
     use super::super::core::Mode;

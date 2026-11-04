@@ -27,13 +27,13 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
+use aiface::connector::Connector;
+use aiface::connector::ToolCallMode;
 use cosh::harness::ContextManagerState;
 use cosh::harness::Harness;
 use cosh::harness::HarnessEvent;
 use cosh::harness::Mode;
 use cosh::harness::queued_input::QueuedInput;
-use cosh_sdk::connector::Connector;
-use cosh_sdk::connector::ToolCallMode;
 
 /// Everything one agent-loop assembly needs, decided by the caller. The
 /// main loop fills it from the user's live config; the cosh pane fills it
@@ -148,7 +148,7 @@ fn build_connector(a: &HarnessAssembly) -> Result<(Connector, Vec<(String, Strin
                     // harness re-resolves per model on every fallback
                     // switch.
                     if let Some(r) = a.reasoning.as_deref()
-                        && let Some(resolved) = cosh_sdk::connector::resolve_reasoning_effort(
+                        && let Some(resolved) = aiface::connector::resolve_reasoning_effort(
                             fb_model,
                             r,
                             Some("cosh/cache"),
@@ -188,7 +188,7 @@ fn build_connector(a: &HarnessAssembly) -> Result<(Connector, Vec<(String, Strin
         let effective = a
             .model
             .as_deref()
-            .and_then(|m| cosh_sdk::connector::resolve_reasoning_effort(m, r, Some("cosh/cache")))
+            .and_then(|m| aiface::connector::resolve_reasoning_effort(m, r, Some("cosh/cache")))
             .unwrap_or_else(|| r.clone());
         with_model.with_reasoning_effort(effective)
     } else {

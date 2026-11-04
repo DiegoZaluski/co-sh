@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 async fn output_limited_summarizer(
     required_output: u64,
 ) -> (
-    cosh_sdk::connector::Connector,
+    aiface::connector::Connector,
     tokio::sync::mpsc::UnboundedReceiver<Option<u64>>,
     tokio::task::JoinHandle<()>,
 ) {
@@ -67,12 +67,12 @@ async fn output_limited_summarizer(
         }
     });
     (
-        cosh_sdk::connector::Connector::new("openrouter")
+        aiface::connector::Connector::new("openrouter")
             .unwrap()
             .with_base_url(format!("http://{address}/v1"))
             .with_api_key("test-only")
             .with_model("glm-5.3-flash")
-            .with_tool_call_mode(cosh_sdk::connector::ToolCallMode::Inline),
+            .with_tool_call_mode(aiface::connector::ToolCallMode::Inline),
         rx,
         server,
     )

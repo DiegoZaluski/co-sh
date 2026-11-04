@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use cosh_sdk::connector::{
+use aiface::connector::{
     get_provider, get_provider_env_var, has_api_key, is_local_provider, known_providers,
 };
 use cosh_tui::core::types::MouseEvent;

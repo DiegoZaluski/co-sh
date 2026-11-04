@@ -1,4 +1,4 @@
-use cosh_sdk::connector::{ToolDefinition, ToolFunction};
+use aiface::connector::{ToolDefinition, ToolFunction};
 use cosh_sdk::extract_action::ToolSchema;
 use rmcp::model::{
     CallToolResult, GetPromptResult, Prompt, PromptMessage, ReadResourceResult, Resource,

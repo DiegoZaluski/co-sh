@@ -12,9 +12,6 @@ version = "0.1.5"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Base64 transport for multimodal image delivery (screenshot tool results
-# travel inline as `ImageBlock` on the connector's message channel).
-base64 = "0.22"
 globset = "0.4.18"
 grep-matcher = "0.1.8"
 grep-regex = "0.1.14"
@@ -102,43 +99,8 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 tokio = { version = "1.52.3", features = ["full"] }
 async-stream = "0.3"
 tokio-stream = "0.1"
-reqwest = { version = "0.13", features = ["json", "form"] }
 url = "2"
-# connector::oauth — Authorization Code + PKCE (RFC 7636), loopback redirect
-# (RFC 8252) and Device Grant (RFC 8628), profiled per RFC 9700 (BCP 240).
-# The `oauth2` crate was rejected: 5.0 pins reqwest 0.12 while this crate is
-# on 0.13, and the protocol surface needed here is small enough to own with
-# the exact security invariants the research calls for.
-# PKCE S256 (RFC 7636 §4.2): SHA-256 over the verifier, base64url no-pad.
-sha2 = "0.10"
-# OS entropy for code_verifier / CSRF state — no time/seed-derived fallback;
-# if entropy is unavailable the authorization attempt aborts (same policy as
-# the root crate's telemetry identifiers).
-getrandom = "0.3"
-# Loopback redirect receiver: hyper 1 with real header/read limits instead of
-# a hand-rolled HTTP parser over TcpListener (RFC 8252 §7.3, §8.1).
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
-# System-browser handoff for the authorization URL. `hardened` restricts the
-# launcher to http(s) schemes. Opening is best-effort — the caller can always
-# display the URL for manual visit (headless/SSH sessions).
-webbrowser = { version = "1", features = ["hardened"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
-# connector::copilot — the OFFICIAL GitHub Copilot agent runtime SDK
-# (github/ org, MIT). Drives the Copilot runtime binary over JSON-RPC
-# (stdio), which is how GitHub now exposes model inference to Rust clients
-# since the GitHub Models inference API was retired (2026-07-30). An
-# isolated connector family wraps it — see connector/copilot/mod.rs.
-github-copilot-sdk = "1.0.16"
-directories = "6.0.0"
-zeroize = { version = "=1.7", features = ["derive"] }
-keyring = { version = "4.1.6", features = [
-    "v1",
-    "apple-native-keyring-store",
-    "windows-native-keyring-store",
-    "zbus-secret-service-keyring-store",
-] }
 
 # lsp::* — Language Server Protocol types (messages, capabilities, URIs).
 # Kept behind our own re-export surface so the concrete crate can be swapped
@@ -171,10 +133,6 @@ path = "examples/find/find.rs"
 [[example]]
 name = "extract-action"
 path = "examples/extract_action/extract.rs"
-
-[[example]]
-name = "connector"
-path = "examples/connector/client.rs"
 
 [[example]]
 name = "tree-sitter"

@@ -264,7 +264,7 @@ async fn agents_split_hides_the_right_panel() {
 async fn charm_usage_event_switches_header_to_credits_balance() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
-    use cosh_sdk::connector::TokenUsage;
+    use aiface::connector::TokenUsage;
 
     let mut app = App::new("/tmp".to_string());
     app.state.add_empty_session("t".into(), "t".into(), 0);

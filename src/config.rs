@@ -39,8 +39,8 @@ pub struct LlmConfig {
     /// How tool calls are delivered: native structured parts (default, like
     /// crush) or inline-JSON text the harness parses. The two paths are
     /// mutually exclusive at the request level — see
-    /// [`cosh_sdk::connector::ToolCallMode`].
-    pub tool_call_mode: cosh_sdk::connector::ToolCallMode,
+    /// [`aiface::connector::ToolCallMode`].
+    pub tool_call_mode: aiface::connector::ToolCallMode,
 }
 
 impl LlmConfig {
@@ -48,12 +48,12 @@ impl LlmConfig {
         // Try to get provider from env, otherwise auto-detect from available API keys
         let provider = std::env::var("COSH_PROVIDER")
             .ok()
-            .or_else(|| cosh_sdk::connector::detect_provider().map(String::from))
+            .or_else(|| aiface::connector::detect_provider().map(String::from))
             .unwrap_or_else(|| "openai".to_string());
 
         let tool_call_mode = match std::env::var("COSH_TOOL_CALL_MODE").as_deref() {
-            Ok("inline") => cosh_sdk::connector::ToolCallMode::Inline,
-            Ok("native") | Ok(_) | Err(_) => cosh_sdk::connector::ToolCallMode::Native,
+            Ok("inline") => aiface::connector::ToolCallMode::Inline,
+            Ok("native") | Ok(_) | Err(_) => aiface::connector::ToolCallMode::Native,
         };
 
         Self {
@@ -80,7 +80,7 @@ const MODELS_DEV_CACHE_DIR: Option<&str> = Some("cosh/cache");
 /// `o1`/`o3`/`o4`/`gpt-5` series, DeepSeek R1, Kimi k2 thinking, Gemini 3.x,
 /// Claude 4.x, GLM thinking models, ...).
 pub fn model_supports_reasoning(model: &str) -> bool {
-    if let Some(meta) = cosh_sdk::connector::model_reasoning(model, MODELS_DEV_CACHE_DIR) {
+    if let Some(meta) = aiface::connector::model_reasoning(model, MODELS_DEV_CACHE_DIR) {
         return meta.supported;
     }
     heuristic_model_supports_reasoning(model)
@@ -92,7 +92,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
 /// otherwise the standard low/medium/high set is offered.
 pub fn model_reasoning_levels(model: &str) -> Vec<String> {
     let mut levels = vec!["default".to_string()];
-    if let Some(meta) = cosh_sdk::connector::model_reasoning(model, MODELS_DEV_CACHE_DIR)
+    if let Some(meta) = aiface::connector::model_reasoning(model, MODELS_DEV_CACHE_DIR)
         && let Some(efforts) = meta.efforts
     {
         for e in efforts {

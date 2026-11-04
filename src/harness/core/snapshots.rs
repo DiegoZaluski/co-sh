@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use cosh_sdk::connector::ClaudeThinkingBlock;
+use aiface::connector::ClaudeThinkingBlock;
 use cosh_tools::lsp::Lsp;
 
 use super::Harness;

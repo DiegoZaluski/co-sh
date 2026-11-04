@@ -5,9 +5,10 @@ use std::sync::atomic::Ordering;
 
 use tokio::time::Duration;
 
-use cosh_sdk::connector::ChatMessage;
-use cosh_sdk::connector::ConnectorError;
-use cosh_sdk::extract_action::{ExtractAction, NativeToolCall, StreamAction, ToolCallData};
+use aiface::NativeToolCall;
+use aiface::connector::ChatMessage;
+use aiface::connector::ConnectorError;
+use cosh_sdk::extract_action::{ExtractAction, StreamAction, ToolCallData};
 
 use super::{CONTEXT_WINDOW_MARKER, Harness, INTERRUPTED_MARKER, StreamEvent, ToolCallMode};
 
@@ -383,7 +384,13 @@ impl Harness {
         extractor: &mut ExtractAction,
         on_event: &mut dyn FnMut(StreamEvent),
     ) {
-        let action = extractor.register_native_call(native);
+        let native = cosh_sdk::extract_action::NativeToolCall {
+            id: native.id.clone(),
+            name: native.name.clone(),
+            arguments: native.arguments.clone(),
+            thought_signature: native.thought_signature.clone(),
+        };
+        let action = extractor.register_native_call(&native);
         self.tool_extraction_failure_count += extractor.take_tool_failures();
         match action {
             StreamAction::Text(text) => {

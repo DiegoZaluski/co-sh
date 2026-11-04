@@ -281,10 +281,7 @@ impl Harness {
     /// `tool_calls`/`tool_use`/`functionCall` parts. Consumed one list per
     /// stream.
     #[cfg(test)]
-    pub(crate) fn with_mock_native_calls(
-        mut self,
-        calls: Vec<cosh_sdk::extract_action::NativeToolCall>,
-    ) -> Self {
+    pub(crate) fn with_mock_native_calls(mut self, calls: Vec<aiface::NativeToolCall>) -> Self {
         self.mock_native_stream_queue.push_back(calls);
         self
     }

@@ -23,7 +23,7 @@ use crate::harness::context::{ContextManager, MAX_CONTEXT_TOKENS};
 use crate::harness::core::{Harness, Mode, StreamEvent};
 use crate::harness::guardrails::{PermissionCheck, check_tool_permission};
 use crate::util::estimate_tokens;
-use cosh_sdk::connector::Connector;
+use aiface::connector::Connector;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

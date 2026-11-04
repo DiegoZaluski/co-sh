@@ -28,6 +28,8 @@ macro_rules! build_base_text {
         "  After an edit tool (fs_edit, fs_edit_lines, fs_ast_edit), the result carries the\n",
         "  updated \u{00B6}path#TAG header — use it directly for subsequent edits on the\n",
         "  same file. Do NOT re-read a file just to get a new tag.\n",
+        "  A write tool (fs_write) result carries the updated \u{00B6}path#TAG header the same\n",
+        "  way: never re-read a file to obtain a tag the previous tool result already provided.\n",
         "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n"
     ) };
 }

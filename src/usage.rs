@@ -7,7 +7,7 @@
 //! object and the REAL cost it reports inside it. A provider that reports no
 //! cost yields a record WITHOUT a price (its tokens still count) and it is
 //! excluded from dollar totals — nothing is ever estimated locally.
-//! `cosh_sdk::connector::supports_cost_reporting` lists the providers that
+//! `aiface::connector::supports_cost_reporting` lists the providers that
 //! report costs today.
 
 use std::io::Write;
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use cosh_sdk::connector::TokenUsage;
+use aiface::connector::TokenUsage;
 
 /// Where the global usage log lives, relative to the data dir.
 const USAGE_DIR: &str = "usage";

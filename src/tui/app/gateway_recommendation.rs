@@ -6,11 +6,9 @@ use crate::routes::session::free_gateway_recommendation::{GatewayOffer, OFFERS};
 use crate::ui::dialogs::{DeviceLoginPhase, DialogType};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
-use cosh_sdk::connector::copilot_oauth;
-use cosh_sdk::connector::openai_compatible::charm_oauth::{self, CharmOAuthConfig};
-use cosh_sdk::connector::{
-    get_provider_env_var, has_api_key, invalidate_api_key, is_local_provider,
-};
+use aiface::connector::copilot_oauth;
+use aiface::connector::openai_compatible::charm_oauth::{self, CharmOAuthConfig};
+use aiface::connector::{get_provider_env_var, has_api_key, invalidate_api_key, is_local_provider};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -735,7 +733,7 @@ async fn device_sign_in_inner(
 async fn charm_device_sign_in(
     origin: SignInOrigin,
     tx: &UnboundedSender<DeviceSignInEvent>,
-) -> Result<cosh_sdk::connector::oauth::TokenSet, String> {
+) -> Result<aiface::connector::oauth::TokenSet, String> {
     let config = CharmOAuthConfig::default();
     let auth = charm_oauth::begin(&config)
         .await
@@ -758,7 +756,7 @@ async fn charm_device_sign_in(
 async fn copilot_device_sign_in(
     origin: SignInOrigin,
     tx: &UnboundedSender<DeviceSignInEvent>,
-) -> Result<cosh_sdk::connector::oauth::TokenSet, String> {
+) -> Result<aiface::connector::oauth::TokenSet, String> {
     let config = copilot_oauth::CopilotOAuthConfig::default();
     let auth = config.begin().await.map_err(|error| error.to_string())?;
     announce_device_transaction(

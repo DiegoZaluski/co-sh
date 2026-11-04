@@ -155,7 +155,7 @@ pub struct CoshTools {
     /// (`dispatch` takes `&self`, so staging is interior-mutable). The
     /// harness drains it right after the dispatch returns `Ok` and lowers
     /// it into the tool-result `ChatMessage` — see `push_tool_history`.
-    pending_images: Mutex<Option<Vec<cosh_sdk::connector::ImageBlock>>>,
+    pending_images: Mutex<Option<Vec<aiface::connector::ImageBlock>>>,
     /// Optional event sender for streaming tool output.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
     /// Per-call routing identity of the tool call currently being
@@ -370,7 +370,7 @@ impl CoshTools {
     /// no images). Called by the harness immediately after the dispatch
     /// `Ok` so the bytes reach the tool-result `ChatMessage`; a payload
     /// left unconsumed (dispatch error path) is dropped here too.
-    pub fn take_pending_images(&self) -> Vec<cosh_sdk::connector::ImageBlock> {
+    pub fn take_pending_images(&self) -> Vec<aiface::connector::ImageBlock> {
         self.pending_images
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -730,7 +730,7 @@ fn config_to_embedder(
             model,
             dim,
         } => {
-            let mut connector = cosh_sdk::connector::Connector::new(provider)
+            let mut connector = aiface::connector::Connector::new(provider)
                 .map_err(|e| format!("connector error: {e}"))?
                 .with_model(model);
             if let Some(url) = _base_urls.get(provider) {

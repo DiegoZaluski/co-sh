@@ -1,6 +1,6 @@
 use super::{App, HOME_LOCK, isolate_home};
 use crate::app::gateway_recommendation::{DeviceSignInEvent, SignInOrigin};
-use cosh_sdk::connector::has_api_key;
+use aiface::connector::has_api_key;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn new_cmd() -> crate::ui::slash_menu::SlashCommand {

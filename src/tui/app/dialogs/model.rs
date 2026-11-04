@@ -91,8 +91,8 @@ impl App {
     /// background revalidation. `current` is whatever model this picker
     /// edits — the global config's, or the focused pane's own.
     fn open_model_dialog_with_current(&mut self, current: String) {
+        use aiface::connector::Connector;
         use cosh::ModelEntry;
-        use cosh_sdk::connector::Connector;
 
         // Collect providers and check if their API key is still configured.
         // If a provider has no key (env var or keyring), invalidate its cache
@@ -102,14 +102,14 @@ impl App {
         // purged too.
         let providers_to_check: Vec<&'static str> = self.active_providers();
         {
-            use cosh_sdk::connector::{is_local_provider, known_providers_with_env};
+            use aiface::connector::{is_local_provider, known_providers_with_env};
             for (provider, _) in known_providers_with_env() {
                 if !is_local_provider(provider) && !providers_to_check.contains(&provider) {
                     // Provider no longer configured — purge cached models
                     self.model_cache.invalidate(&provider.to_string());
                 }
             }
-            for provider in cosh_sdk::connector::known_local_providers() {
+            for provider in aiface::connector::known_local_providers() {
                 if !providers_to_check.contains(&provider) {
                     self.model_cache.invalidate(&provider.to_string());
                 }

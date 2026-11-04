@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::time::Duration;
 
-use cosh_sdk::connector::{Connector, resolve_reasoning_effort};
+use aiface::connector::{Connector, resolve_reasoning_effort};
 
 #[cfg(not(test))]
 use super::context::ContextManager;

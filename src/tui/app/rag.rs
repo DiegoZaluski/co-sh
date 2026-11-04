@@ -520,8 +520,8 @@ pub(super) fn create_cloud_embedder(
     dim: usize,
     base_urls: &std::collections::HashMap<String, String>,
 ) -> Result<cosh_recall::embed::Embedder, String> {
+    use aiface::connector::Connector;
     use cosh_recall::embed::Embedder;
-    use cosh_sdk::connector::Connector;
     let mut connector = Connector::new(provider)
         .map_err(|e| format!("Failed to create connector: {e}"))?
         .with_model(model);
