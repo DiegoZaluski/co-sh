@@ -1,0 +1,27 @@
+# Project-local cargo configuration.
+#
+# This machine has 12 cores but only ~13 GB of RAM (and a 4 GB swap that is
+# already under pressure from desktop apps). The default Rust test harness
+# spawns one thread per CPU, and several suites use multi-threaded tokio
+# runtimes inside the tests, so an unrestricted `cargo test --workspace` can
+# blow up into hundreds of live threads and freeze the desktop through swap
+# thrashing.
+#
+# These settings apply to EVERY cargo invocation made from inside this repo,
+# including ones run by agents/harnesses that just call plain `cargo test`.
+
+[build]
+# 4 parallel rustc jobs already trigger the OOM killer on this 13 GB machine
+# when the desktop is loaded (Firefox, rust-analyzer...). 2 is the safe cap.
+jobs = 2
+
+[env]
+# Cap the test harness parallelism (default = 1 thread per CPU = 12).
+# 4 threads keeps the run fast while staying far from OOM territory.
+RUST_TEST_THREADS = "4"
+
+# Dependency crates do not need debug info: dropping it roughly halves rustc
+# memory per job and shrinks target/ by several GB, which also makes linking
+# cheaper. Workspace crates keep full debuginfo via the manifest profile.
+[profile.dev.package."*"]
+debug = false
