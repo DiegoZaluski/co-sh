@@ -864,6 +864,177 @@ pub fn validate_agent(agent: &str) -> Result<(), String> {
     }
 }
 
+/// Resolve the session `cwd` a harness receives, once for every entry
+/// point (`call`, `replay`, `session_snapshot`).
+///
+/// The ACP harnesses validate the session cwd themselves — goose's
+/// `validate_absolute_cwd` rejects a relative path outright ("cwd must be
+/// an absolute path") and a directory that no longer exists ("invalid
+/// directory path", the `invalid_params` rejection behind a pane's
+/// "[replay failed] ACP session/load failed: Invalid params"), so cosh
+/// prepares the path before it ever reaches the wire:
+///
+/// 1. `canonicalize` — the TUI stores the working directory as the user
+///    typed it (which may be relative, `.` in an in-place `cosh`) and
+///    resolves symlinked roots lazily; the harness wants the resolved
+///    absolute spelling.
+/// 2. When the path does not exist (or is not a directory) anymore, the
+///    behavior splits by strictness:
+///    - [`CwdStrictness::Strict`] (the LIVE-TURN path, `call`): the
+///      original path rides through and the harness rejects it. A live
+///      turn's fs requests are served against the session cwd and
+///      auto-approved under the pane's Yolo mode — silently substituting
+///      a vanished workspace (the common case: a worktree under
+///      `<OS temp>/cosh-worktrees` a reboot's temp cleaner deleted) with
+///      the user's home directory would run the agent in `~` and widen
+///      the sandbox there without the user ever learning the workspace
+///      is gone. Failing loudly preserves the exact pre-fix behavior
+///      (`PinnedRoot::acquire` already refused an inaccessible workspace)
+///      and the next prompt through the normal turn path degrades to a
+///      fresh session as designed.
+///    - [`CwdStrictness::Substitute`] (the READ-ONLY passes, `replay` /
+///      `session_snapshot`): fall back to the user's home directory.
+///      The harness's own store keyed the session by the ORIGINAL cwd,
+///      so replaying in the session's true directory is impossible — the
+///      choice is between an unconditional rejection and a best-effort
+///      load in a stable directory. The home fallback follows goose's own
+///      recovery direction (aaif-goose/goose#10643: substitute the home
+///      directory on `session/load` when the stored cwd is gone) so the
+///      transcript replay proceeds; nothing is prompted and no fs request
+///      is ever served on these passes.
+///
+/// An existing directory keeps its canonical spelling — never silently
+/// redirected. The original path is returned when even the fallback
+/// cannot be resolved (`None` home), preserving the harness's own
+/// rejection message instead of masking it with a made-up one.
+#[must_use]
+pub fn prepare_session_cwd(cwd: &std::path::Path, strictness: CwdStrictness) -> std::path::PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(cwd)
+        && resolved.is_dir()
+    {
+        return resolved;
+    }
+    // Missing (or otherwise unusable) directory. The live-turn path never
+    // substitutes: a real rejection beats a silently relocated sandbox.
+    if strictness == CwdStrictness::Strict {
+        return cwd.to_path_buf();
+    }
+    // The read-only passes substitute home when it resolves to a real
+    // directory, and log the substitution — a silent path swap would be
+    // indistinguishable from a bug in the harness.
+    if let Some(home) = crate::skills::home_dir()
+        && let Ok(home) = std::fs::canonicalize(&home)
+        && home.is_dir()
+    {
+        log::warn!(
+            "subagent session cwd '{}' no longer exists; \
+             falling back to home '{}' for this read-only pass",
+            cwd.display(),
+            home.display()
+        );
+        return home;
+    }
+    log::warn!(
+        "subagent session cwd '{}' no longer exists and no home \
+         directory resolved; passing it through for the harness to reject",
+        cwd.display()
+    );
+    cwd.to_path_buf()
+}
+
+/// The cwd strictness a [`prepare_session_cwd`] caller asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CwdStrictness {
+    /// The LIVE-TURN path (`call`): a missing workspace must fail loudly —
+    /// no silent substitution, the harness (or the sandbox pin) rejects.
+    Strict,
+    /// The READ-ONLY passes (`replay`, `session_snapshot`): a missing
+    /// workspace substitutes the home directory so the load/probe proceeds.
+    Substitute,
+}
+
+#[cfg(test)]
+mod cwd_preparation_tests {
+    use super::{CwdStrictness, prepare_session_cwd};
+    use std::path::PathBuf;
+
+    /// An EXISTING directory canonicalizes: a RELATIVE spelling resolves
+    /// against the process cwd, and a symlinked root resolves to its target
+    /// — the harness receives the resolved absolute path, never the user's
+    /// typed shorthand (the `.`-in-place `cosh` shape). Built under the
+    /// process cwd so the relative branch is genuinely exercised.
+    #[test]
+    fn existing_directory_resolves_to_absolute_and_directory() {
+        let base = std::env::current_dir().expect("cwd");
+        let dir = tempfile::TempDir::new_in(&base).expect("tempdir");
+        // A relative spelling of the tempdir (`./tmp-xyz/…`), relative to
+        // the process cwd the helper resolves against.
+        let relative = dir
+            .path()
+            .strip_prefix(&base)
+            .expect("tempdir under cwd strips to a relative rest");
+        let relative = PathBuf::from(".").join(relative);
+        let prepared = prepare_session_cwd(&relative, CwdStrictness::Strict);
+        assert!(prepared.is_absolute(), "{prepared:?} must be absolute");
+        assert!(
+            prepared.canonicalize().expect("canonical") == dir.path().canonicalize().expect("cwd"),
+            "{prepared:?} must be the tempdir"
+        );
+    }
+
+    /// A path that NO LONGER EXISTS — the rebooted-worktree case, the exact
+    /// shape behind goose's `invalid directory path` rejection — takes the
+    /// home fallback on the LENIENT passes so `session/load` is judged on
+    /// the session id instead of being rejected on the ghost cwd before
+    /// the transcript replay starts.
+    #[test]
+    fn missing_directory_falls_back_to_home_when_lenient() {
+        let ghost = std::env::temp_dir()
+            .join("cosh-cwd-test-missing")
+            .join("definitely-gone");
+        assert!(!ghost.exists());
+        let prepared = prepare_session_cwd(&ghost, CwdStrictness::Substitute);
+        // The fallback is the home directory when it resolves; only when
+        // NO home resolves at all does the original path ride through for
+        // the harness to reject (the documented degrade — pinned by the
+        // sibling strict test). On a normal environment the result is a
+        // REAL directory.
+        assert!(
+            prepared.is_dir(),
+            "{prepared:?} must be an existing directory"
+        );
+    }
+
+    /// The STRICT pass (the live-turn path, `call`) never substitutes: a
+    /// missing workspace keeps its original spelling and the harness (or
+    /// the sandbox pin) rejects it loudly — a silent home relocation would
+    /// run the turn and widen the fs sandbox into `~` without the user
+    /// ever learning the workspace is gone.
+    #[test]
+    fn missing_directory_stays_raw_when_strict() {
+        let ghost = std::env::temp_dir()
+            .join("cosh-cwd-test-missing")
+            .join("strictly-gone");
+        assert!(!ghost.exists());
+        let prepared = prepare_session_cwd(&ghost, CwdStrictness::Strict);
+        assert_eq!(prepared, ghost, "strict must pass the ghost path through");
+    }
+
+    /// An existing FILE (not a directory) is also unusable as a session cwd
+    /// — the harnesses check `is_dir` — so the LENIENT pass takes the home
+    /// fallback too.
+    #[test]
+    fn existing_file_takes_the_fallback() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        assert!(file.path().is_file());
+        let prepared = prepare_session_cwd(file.path(), CwdStrictness::Substitute);
+        assert!(
+            prepared.is_dir(),
+            "{prepared:?} must fall back to a directory"
+        );
+    }
+}
+
 /// Call a sub-agent harness over ACP and return its final output.
 ///
 /// 1. Looks up `agent` (built-in table or user registry) via [`find_agent`]
@@ -925,6 +1096,12 @@ pub async fn call(
 ) -> Result<(String, String, Option<String>), String> {
     validate_agent(agent)?;
     let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    // Absolute, resolved session cwd for EVERY request on this connection
+    // (`session/new`, resume/load, the fs roots): the harnesses validate
+    // it, so a relative TUI spelling must be resolved before the wire —
+    // see `prepare_session_cwd`. STRICT: a live turn never silently
+    // relocates a vanished workspace into the home sandbox.
+    let cwd = prepare_session_cwd(&cwd, CwdStrictness::Strict);
     // The caller's picks win — the /agents config box writes the user's
     // choices into the pane's config cache and every turn re-applies them
     // (`apply_session_picks`), so the choices survive. A model-less pick
@@ -1035,6 +1212,15 @@ pub async fn replay(
 ) -> Result<(), String> {
     validate_agent(agent)?;
     let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    // Same harness-side validation as every other entry point — a replay
+    // pass carries the pane's STORED cwd, which is exactly the path most
+    // likely to have vanished (a worktree under the OS temp root cleaned
+    // by the reboot between the turns). `prepare_session_cwd` resolves or
+    // substitutes it so `session/load` is judged on the session id, not
+    // rejected on the directory before the replay ever starts. LENIENT:
+    // replay prompts nothing and serves no fs requests, so a home
+    // substitution cannot widen any sandbox.
+    let cwd = prepare_session_cwd(&cwd, CwdStrictness::Substitute);
     let launcher = agent_launcher(&entry)?.with_debug(|line, direction| {
         if matches!(direction, LineDirection::Stderr) {
             log::debug!("subagent ACP stderr: {line}");
@@ -1245,13 +1431,14 @@ pub async fn session_snapshot(
 ) -> Result<SessionSnapshot, String> {
     validate_agent(agent)?;
     let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
-    // The harnesses validate `cwd` as an ABSOLUTE path (claude-code ACP
-    // rejects `session/new` with a relative one — "must be an absolute
-    // path"). The TUI stores the working directory as the user typed it,
-    // which may be relative (`.` in a `cosh` session started in-place), so
-    // canonicalize here; an unresolvable path keeps the original and fails
-    // at the harness with the same clarity as before.
-    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    // The harnesses validate `cwd` as an ABSOLUTE path to an EXISTING
+    // directory (goose's `validate_absolute_cwd`). The stored pane cwd is
+    // whatever the user's session carried — possibly relative, possibly a
+    // worktree a reboot's temp cleaner deleted — so it is prepared here,
+    // at the protocol boundary, instead of failing the resume on the wire
+    // (see `prepare_session_cwd`). LENIENT for the same reason as the
+    // replay pass: a probe prompts nothing and serves no fs requests.
+    let cwd = prepare_session_cwd(&cwd, CwdStrictness::Substitute);
     let launcher = agent_launcher(&entry)?.with_debug(|line, direction| {
         if matches!(direction, LineDirection::Stderr) {
             log::debug!("subagent ACP stderr: {line}");
