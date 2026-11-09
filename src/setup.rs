@@ -229,14 +229,22 @@ impl Default for Appearance {
     }
 }
 
-/// Tool-call mode and disabled tool set.
+/// Tool-call mode, disabled tool set and the scope the disabled set applies
+/// to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tools {
     /// `"native"` or `"inline"`.
     pub tool_call_mode: String,
-    /// Tool names the user has disabled (hidden from the model).
+    /// Tool names the user has disabled (hidden from the model). Applies to
+    /// the scope selected by [`Tools::scope`] — the global `setup.json` when
+    /// `"global"`, or the per-project `.cosh-tools.json` in the cwd otherwise.
     pub disabled: Vec<String>,
+    /// Which scope `disabled` is persisted to. Default `"project"`: every
+    /// new environment starts with its own tool set, so one project's
+    /// blocklist never leaks into another. `"global"` restores the old
+    /// setup.json-wide behavior.
+    pub scope: String,
 }
 
 impl Default for Tools {
@@ -244,7 +252,17 @@ impl Default for Tools {
         Self {
             tool_call_mode: "native".to_string(),
             disabled: Vec::new(),
+            scope: "project".to_string(),
         }
+    }
+}
+
+impl Tools {
+    /// Whether the disabled-tool set is shared across every project
+    /// (`"global"`) or per-cwd (any other value, defaulting to project).
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        self.scope == "global"
     }
 }
 

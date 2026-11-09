@@ -46,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Internal Tools screen's disabled list no longer leaks between projects.
+  The blocklist was always persisted to the global `setup.json`, so one
+  project's tool choices applied to every other environment. A Global toggle
+  now sits as the screen's first row — OFF by default, with the same
+  check/cross contract as the disable toggles: with it off, the disabled set
+  persists to `.cosh-tools.json` in the directory cosh was started from, so
+  each project keeps its own tool set; with it on, the old global behavior
+  applies. The scope choice itself persists to `setup.json` (`tools.scope`),
+  so it survives a restart. While a project has no blocklist file yet, a
+  pre-existing global blocklist keeps applying (migration), and the first
+  project-scope save takes over from there.
+
 ## [0.2.1]
 
 ### Fixed

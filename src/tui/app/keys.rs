@@ -920,10 +920,11 @@ impl App {
                         return Ok(false);
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        self.internal_tools_view.toggle_current();
-                        crate::routes::tools::save_disabled_tools(
+                        let cwd = self.state.working_directory.clone();
+                        crate::routes::tools::toggle_entry(
+                            &mut self.internal_tools_view,
                             &mut self.setup,
-                            &self.internal_tools_view.disabled,
+                            &cwd,
                         );
                         return Ok(false);
                     }

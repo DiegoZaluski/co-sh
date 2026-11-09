@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -10,13 +11,106 @@ use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 
-pub fn load_disabled_tools(setup: &cosh::setup::Setup) -> HashSet<String> {
-    setup.tools.disabled.iter().cloned().collect()
+/// Per-project tool-blocklist file, stored in the directory cosh was started
+/// from. Keeps one project's blocklist from leaking into another's — the
+/// global scope (`setup.json`) is opt-in via the Global toggle.
+const PROJECT_TOOLS_FILE: &str = ".cosh-tools.json";
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct ProjectTools {
+    #[serde(default)]
+    disabled: Vec<String>,
 }
 
-pub fn save_disabled_tools(setup: &mut cosh::setup::Setup, disabled: &HashSet<String>) {
-    setup.tools.disabled = disabled.iter().cloned().collect();
-    setup.save();
+fn project_tools_path(cwd: &str) -> PathBuf {
+    PathBuf::from(cwd).join(PROJECT_TOOLS_FILE)
+}
+
+/// Load the disabled-tool set for the selected scope.
+///
+/// - Global: the `setup.json` blocklist, shared by every project.
+/// - Project: `<cwd>/.cosh-tools.json`. While that file does not exist yet,
+///   a non-empty global blocklist keeps applying (migration: users who had
+///   tools disabled before the scope existed do not silently lose them);
+///   the first project-scope save takes over from there. A corrupt file
+///   fails open (nothing disabled) rather than blocking the session.
+#[must_use]
+pub fn load_disabled_tools(
+    setup: &cosh::setup::Setup,
+    cwd: &str,
+    global: bool,
+) -> HashSet<String> {
+    if global {
+        return setup.tools.disabled.iter().cloned().collect();
+    }
+    match std::fs::read_to_string(project_tools_path(cwd)) {
+        Ok(text) => serde_json::from_str::<ProjectTools>(&text)
+            .map(|project| project.disabled.into_iter().collect())
+            .unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if setup.tools.disabled.is_empty() {
+                HashSet::new()
+            } else {
+                // Pre-scope global blocklist still applies until this
+                // project saves a list of its own.
+                setup.tools.disabled.iter().cloned().collect()
+            }
+        }
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// Persist the disabled set to the scope's storage: `setup.json` for the
+/// global scope, `<cwd>/.cosh-tools.json` for the project scope (the global
+/// `setup.json` is left untouched so a project list never clobbers it).
+pub fn save_disabled_tools(
+    setup: &mut cosh::setup::Setup,
+    disabled: &HashSet<String>,
+    cwd: &str,
+    global: bool,
+) {
+    if global {
+        setup.tools.disabled = disabled.iter().cloned().collect();
+        setup.save();
+        return;
+    }
+    let mut names: Vec<String> = disabled.iter().cloned().collect();
+    names.sort();
+    let payload = ProjectTools { disabled: names };
+    if let Ok(text) = serde_json::to_string_pretty(&payload) {
+        // A silent failure would leave the toggle looking applied while the
+        // blocklist dies with the session; the user needs to know.
+        if let Err(error) = std::fs::write(project_tools_path(cwd), text) {
+            log::warn!("could not persist the project tool blocklist in {cwd}: {error}");
+        }
+    }
+}
+
+/// One entry point for both the keyboard and the mouse toggle paths.
+///
+/// Toggles the row under the selection (the Global scope row flips the
+/// scope; a tool row flips its entry), then keeps the view's `disabled` set
+/// and the persisted storage in sync with the active scope:
+///
+/// - Global row: persist the scope choice itself to `setup.json` and reload
+///   `disabled` from the newly selected scope's stored set — the toggle
+///   survives a restart even before any tool is toggled in that scope.
+/// - Tool row: persist the set to the active scope (`setup.json` when
+///   global, `<cwd>/.cosh-tools.json` otherwise).
+pub fn toggle_entry(
+    view: &mut InternalToolsView,
+    setup: &mut cosh::setup::Setup,
+    cwd: &str,
+) {
+    let scope_row = view.selection.selected_index == GLOBAL_ROW_INDEX;
+    view.toggle_current();
+    if scope_row {
+        setup.tools.scope = if view.global { "global" } else { "project" }.to_string();
+        setup.save();
+        view.disabled = load_disabled_tools(setup, cwd, view.global);
+    } else {
+        save_disabled_tools(setup, &view.disabled, cwd, view.global);
+    }
 }
 
 /// Load the persisted tool-call mode. Unknown/missing values fall back to
@@ -113,11 +207,17 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
 pub struct InternalToolsView {
     pub selection: ListSelection,
     pub disabled: HashSet<String>,
+    /// When `true` the blocklist is written to the global `setup.json` and
+    /// applies to every project; when `false` (the default) it is scoped to
+    /// the cwd via `.cosh-tools.json`. Rendered as the toggle row above the
+    /// tool list — default OFF, hence the ✗ symbol.
+    pub global: bool,
     pub changed: bool,
     /// How many rows actually fit in the current viewport. Updated on every
     /// render so that scrolling, clamping and mouse hit-testing all agree on
     /// the same value — otherwise items scroll out of view while free space
     /// below the list is wasted (same fix as the ADD Provider router).
+    /// Counts the Global toggle row: index 0 is Global, 1.. are tools.
     visible_count: usize,
     /// Buffer row of the first visible list item, captured at render time.
     /// The vertical centering depends on the exact area the render used, so
@@ -127,11 +227,20 @@ pub struct InternalToolsView {
     pub(crate) list_start_y: u16,
 }
 
+/// Selection index of the Global scope toggle: it sits above every tool row.
+pub const GLOBAL_ROW_INDEX: usize = 0;
+
+/// Every selectable row: the Global toggle plus one row per tool.
+fn total_rows() -> usize {
+    internal_tools().len() + 1
+}
+
 impl InternalToolsView {
     pub fn new() -> Self {
         Self {
             selection: ListSelection::new(),
             disabled: HashSet::new(),
+            global: false,
             changed: false,
             visible_count: 0,
             list_start_y: 0,
@@ -140,19 +249,31 @@ impl InternalToolsView {
 
     pub fn select_next(&mut self) {
         self.selection.set_visible_count(self.visible_count.max(1));
-        self.selection.select_next(internal_tools().len());
+        self.selection.select_next(total_rows());
     }
 
     pub fn select_prev(&mut self) {
         self.selection.set_visible_count(self.visible_count.max(1));
-        self.selection.select_prev(internal_tools().len());
+        self.selection.select_prev(total_rows());
     }
 
     pub fn toggle_current(&mut self) {
-        let (name, _) = internal_tools()[self.selection.selected_index];
+        if self.selection.selected_index == GLOBAL_ROW_INDEX {
+            self.toggle_global();
+            return;
+        }
+        let (name, _) = internal_tools()[self.selection.selected_index - 1];
         if !self.disabled.remove(name) {
             self.disabled.insert(name.to_string());
         }
+        self.changed = true;
+    }
+
+    /// Flip the scope of the blocklist. Does NOT persist anything by itself:
+    /// the caller swaps `disabled` to the newly selected scope's stored set
+    /// and the next tool toggle writes there.
+    pub fn toggle_global(&mut self) {
+        self.global = !self.global;
         self.changed = true;
     }
 
@@ -161,7 +282,7 @@ impl InternalToolsView {
         // is actually drawn on screen. The mouse path receives a slightly
         // different area, and re-deriving the centered block from it shifted
         // every row by one (see the ADD Provider router's regression test).
-        let count = self.visible_count.min(internal_tools().len());
+        let count = self.visible_count.min(total_rows());
         if count == 0 {
             return None;
         }
@@ -179,9 +300,12 @@ impl InternalToolsView {
         if !hit {
             return None;
         }
-        for i in 0..count {
+            for i in 0..count {
+            // The Global row scrolls with the list like any other row, so
+            // the render, the hit-test and the selection window all agree:
+            // row j shows selection index scroll_offset + j.
             let idx = self.selection.scroll_offset + i;
-            if idx >= internal_tools().len() {
+            if idx >= total_rows() {
                 break;
             }
             let item_y = list_start_y + i as u16;
@@ -232,10 +356,10 @@ impl InternalToolsView {
         );
 
         // Clamp selection and scroll before rendering
-        let count = visible_items(area).min(internal_tools().len());
+        let count = visible_items(area).min(total_rows());
         self.visible_count = count;
         self.selection.set_visible_count(count.max(1));
-        self.selection.clamp(internal_tools().len());
+        self.selection.clamp(total_rows());
 
         // tools list aligned
         let list_start_y = start_y + 2;
@@ -250,25 +374,49 @@ impl InternalToolsView {
         let name_x = row_x + cols.name_x as u16;
         let desc_x = row_x + cols.desc_x as u16;
 
+        // One unified loop: row j on screen renders selection index
+        // scroll_offset + j — index 0 is the Global scope toggle, index n ≥ 1
+        // is internal_tools()[n - 1]. The Global row scrolls with the list,
+        // so the render, the mouse hit-test and the selection window can
+        // never disagree on which index a screen row shows.
+        //
+        // Global row (index 0): whether the blocklist applies to this project
+        // only (default) or globally. Same ✔/✗ contract as the disable
+        // toggles, read from the user's angle: default is OFF (project scope)
+        // so it renders ✗; global is opt-in → ✔.
         for i in 0..count {
             let idx = self.selection.scroll_offset + i;
-            if idx >= internal_tools().len() {
+            if idx >= total_rows() {
                 break;
             }
-            let (name, desc) = internal_tools()[idx];
             let y = list_start_y + i as u16;
             if y >= area.bottom() {
                 break;
             }
 
-            let enabled = !self.disabled.contains(name);
-            let symbol = if enabled { "✔" } else { "✗" };
-            let sym_color = if enabled { Color::Green } else { Color::Red };
+            let (name, desc, symbol, sym_color) = if idx == GLOBAL_ROW_INDEX {
+                (
+                    "Global".to_string(),
+                    "Apply the disabled tools to every project (OFF = this project only)"
+                        .to_string(),
+                    if self.global { "✔" } else { "✗" },
+                    if self.global { Color::Green } else { Color::Red },
+                )
+            } else {
+                let (name, desc) = internal_tools()[idx - 1];
+                let enabled = !self.disabled.contains(name);
+                (
+                    name.to_string(),
+                    desc.to_string(),
+                    if enabled { "✔" } else { "✗" },
+                    if enabled { Color::Green } else { Color::Red },
+                )
+            };
             let is_selected = idx == self.selection.selected_index;
             let row_color = if is_selected { primary } else { fg };
 
-            // Fixed columns: symbol, name and description. Every tool row
-            // carries all three, so the description column never shifts.
+            // Fixed columns: symbol, name and description. Every row carries
+            // all three, so the description column never shifts.
             draw_text_line(
                 buf,
                 symbol,
@@ -279,7 +427,7 @@ impl InternalToolsView {
             );
             draw_text_line(
                 buf,
-                name,
+                &name,
                 name_x,
                 y,
                 area.right() - name_x,
@@ -287,7 +435,7 @@ impl InternalToolsView {
             );
             draw_text_line(
                 buf,
-                desc,
+                &desc,
                 desc_x,
                 y,
                 area.right() - desc_x,
@@ -300,6 +448,7 @@ impl InternalToolsView {
 /// Fixed column layout of the tools list, derived once from the widest
 /// name/description so every row aligns: `[✔/✗] [name] [description]`. The
 /// render, the centering budget and the mouse hit-test all share it.
+/// The Global row's description is intentionally short enough to fit it.
 struct Columns {
     name_x: usize,
     desc_x: usize,
@@ -322,7 +471,7 @@ fn columns() -> Columns {
 
 /// Compute the Y position where title and list start (vertically centered).
 fn content_start_y(area: Rect) -> u16 {
-    let count = visible_items(area).min(internal_tools().len());
+    let count = visible_items(area).min(total_rows());
     let content_height = count + 2; // title + blank line + items
     area.y + (area.height.saturating_sub(content_height as u16)) / 2
 }
@@ -357,7 +506,7 @@ mod tests {
     #[test]
     fn scroll_fits_the_real_viewport() {
         let theme = ThemeRegistry::new().themes[0].theme.clone();
-        // Tall viewport: every tool fits with room to spare.
+        // Tall viewport: the Global row plus every tool fits with room to spare.
         let area = Rect::new(0, 0, 100, 60);
         let mut view = InternalToolsView::new();
         let mut buf = Buffer::empty(area);
@@ -365,10 +514,10 @@ mod tests {
 
         assert_eq!(
             view.visible_count,
-            internal_tools().len(),
-            "viewport must fit the whole list"
+            total_rows(),
+            "viewport must fit the Global row and the whole list"
         );
-        for _ in 0..internal_tools().len() {
+        for _ in 0..total_rows() {
             view.select_next();
         }
         assert_eq!(
@@ -444,6 +593,126 @@ mod tests {
         let len = names.len();
         names.dedup();
         assert_eq!(names.len(), len);
+    }
+
+    /// The Global row (index 0) flips the scope, persists the choice to
+    /// `setup.json` and swaps `disabled` to the other scope's stored set.
+    #[test]
+    fn toggling_the_global_row_swaps_scopes_without_writing() {
+        // The scope toggle itself calls setup.save(); pin the config dir to
+        // a scratch dir so the developer's real setup.json is never touched.
+        let scratch = tempfile::tempdir().unwrap();
+        let previous_cfg = std::env::var("COSH_CONFIG_DIR").ok();
+        unsafe { std::env::set_var("COSH_CONFIG_DIR", scratch.path()) };
+
+        let mut setup = cosh::setup::Setup::default();
+        setup.tools.disabled = vec!["web_fetch".to_string()];
+
+        // Project scope (default): one tool disabled locally.
+        let mut view = InternalToolsView::new();
+        view.disabled.insert("fs_read".to_string());
+        // Selection already starts on the Global row (index 0).
+
+        toggle_entry(&mut view, &mut setup, "/definitely/not/a/real/cwd");
+        assert!(view.global, "the Global row must flip the scope ON");
+        assert_eq!(
+            setup.tools.scope, "global",
+            "the scope choice must persist to setup.json"
+        );
+        assert!(
+            view.disabled.contains("web_fetch"),
+            "the view must adopt the global scope's stored set"
+        );
+        assert!(
+            !view.disabled.contains("fs_read"),
+            "the project-only set must not leak into the global view"
+        );
+        assert!(
+            !std::path::Path::new("/definitely/not/a/real/cwd/.cosh-tools.json").exists(),
+            "toggling the scope itself must not write the project file"
+        );
+
+        // Back to project scope: the project choice persists too, and with no
+        // project file on disk yet the pre-scope global blocklist applies
+        // (the migration fallback).
+        toggle_entry(&mut view, &mut setup, "/definitely/not/a/real/cwd");
+        assert!(!view.global);
+        assert_eq!(setup.tools.scope, "project");
+        assert_eq!(view.disabled.iter().collect::<Vec<_>>(), ["web_fetch"]);
+
+        match previous_cfg {
+            Some(value) => unsafe { std::env::set_var("COSH_CONFIG_DIR", value) },
+            None => unsafe { std::env::remove_var("COSH_CONFIG_DIR") },
+        }
+    }
+
+    /// Project scope (the default): a tool toggle persists to
+    /// `<cwd>/.cosh-tools.json` and leaves the global setup.json untouched;
+    /// a fresh load from the same cwd reads the set back.
+    #[test]
+    fn project_scope_persists_to_the_cwd_and_keeps_setup_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+
+        let mut setup = cosh::setup::Setup::default();
+        setup.tools.disabled = vec!["web_fetch".to_string()];
+
+        // The Global row is index 0; select the FIRST TOOL (index 1 =
+        // bash_run) and toggle it off.
+        let mut view = InternalToolsView::new();
+        view.selection.selected_index = 1;
+        toggle_entry(&mut view, &mut setup, &cwd);
+
+        assert!(view.disabled.contains("bash_run"));
+        // The global blocklist is untouched by a project-scope write.
+        assert_eq!(setup.tools.disabled, vec!["web_fetch".to_string()]);
+
+        // A fresh load for the SAME cwd reads the project file.
+        let reloaded = load_disabled_tools(&setup, &cwd, false);
+        assert!(reloaded.contains("bash_run"), "the project file must persist");
+        assert!(
+            !reloaded.contains("web_fetch"),
+            "the project scope must not inherit the global set once it saved its own"
+        );
+
+        // A DIFFERENT cwd does not see this project's blocklist.
+        let other = tempfile::tempdir().unwrap();
+        let other_set = load_disabled_tools(&setup, other.path().to_string_lossy().as_ref(), false);
+        assert!(
+            other_set.contains("web_fetch"),
+            "another project falls back to the pre-scope global set"
+        );
+        assert!(
+            !other_set.contains("bash_run"),
+            "another project must NOT inherit this project's blocklist"
+        );
+    }
+
+    /// The Global row's symbol follows the same ✔/✗ contract as the tool
+    /// rows: OFF (project scope, the default) renders ✗ at the symbol column.
+    #[test]
+    fn global_row_renders_the_x_symbol_by_default() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let term = Rect::new(0, 0, 100, 40);
+
+        let mut view = InternalToolsView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(&mut buf, Rect::new(0, 1, 100, term.height - 4), &theme);
+
+        let row_x = (100u16.saturating_sub(max_row_width() as u16)) / 2;
+        let sym_cell = buf
+            .cell((row_x, view.list_start_y))
+            .map(|c| c.symbol().to_owned())
+            .unwrap_or_default();
+        assert_eq!(sym_cell, "✗", "project scope (default) must render ✗");
+
+        view.global = true;
+        view.render(&mut buf, Rect::new(0, 1, 100, term.height - 4), &theme);
+        let sym_cell = buf
+            .cell((row_x, view.list_start_y))
+            .map(|c| c.symbol().to_owned())
+            .unwrap_or_default();
+        assert_eq!(sym_cell, "✔", "global scope must render ✔");
     }
 
     /// The hover-follow contract: a Move over a row moves the highlight and

@@ -949,7 +949,11 @@ async fn tools_hover_moves_selection_and_release_click_toggles() {
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
-    let mut app = App::new("/tmp".to_string());
+    // The project-scope toggle persists to `<cwd>/.cosh-tools.json`; a
+    // throwaway cwd keeps runs independent (a shared /tmp would make the
+    // second run toggle the tool back ON).
+    let tools_cwd = tempfile::tempdir().unwrap();
+    let mut app = App::new(tools_cwd.path().to_string_lossy().to_string());
     app.set_test_size(100, 40);
     app.run_slash_command(&slash_cmd("tools"));
     assert!(matches!(app.mode(), AppMode::InternalTools));

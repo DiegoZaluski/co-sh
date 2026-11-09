@@ -699,7 +699,7 @@ pub struct App {
 impl App {
     pub fn new(cwd: String) -> Self {
         let mut state = AppState::new();
-        state.working_directory = cwd;
+        state.working_directory = cwd.clone();
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
@@ -746,8 +746,11 @@ impl App {
         let saved_fallbacks = fallback::load_fallbacks(&setup);
         let saved_prompt_corrector_fallbacks = fallback::load_prompt_corrector_fallbacks(&setup);
 
-        // Load saved disabled tools from setup config
-        let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&setup);
+        // Load saved disabled tools for the scope persisted in setup.json
+        // (project by default: `<cwd>/.cosh-tools.json`; global: setup.json).
+        let scope_is_global = setup.tools.is_global();
+        let saved_disabled_tools =
+            crate::routes::tools::load_disabled_tools(&setup, &cwd, scope_is_global);
         // Persisted tool-call mode overrides the env default for the session.
         let saved_tool_call_mode = crate::routes::tools::load_tool_call_mode(&setup);
 
@@ -876,6 +879,7 @@ impl App {
             internal_tools_view: {
                 let mut v = InternalToolsView::new();
                 v.disabled = saved_disabled_tools;
+                v.global = scope_is_global;
                 v
             },
             show_internal_tools: false,

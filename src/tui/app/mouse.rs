@@ -2126,10 +2126,11 @@ impl App {
             let tools_area = self.internal_tools_mouse_area();
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
                 self.internal_tools_view.selection.selected_index = clicked_idx;
-                self.internal_tools_view.toggle_current();
-                crate::routes::tools::save_disabled_tools(
+                let cwd = self.state.working_directory.clone();
+                crate::routes::tools::toggle_entry(
+                    &mut self.internal_tools_view,
                     &mut self.setup,
-                    &self.internal_tools_view.disabled,
+                    &cwd,
                 );
                 return Ok(true);
             }
