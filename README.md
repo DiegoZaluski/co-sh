@@ -6,6 +6,29 @@ Cosh is a general-purpose coding agent for the terminal, with software engineeri
 
 <img width="720" height="406" alt="demo" src="https://github.com/user-attachments/assets/9a9161fa-f2ac-43f4-8623-8ae54d64c8bc" />
 
+## Why co-sh?
+
+co-sh isn't meant to replace established coding agents — it's designed to work alongside them as an orchestration layer. Here's why you might want to use it:
+
+- **Multi-agent collaboration** — Run different state-of-the-art agents (Claude, Gemini, Codex, Cline, etc.) directly within the same TUI, creating a shared workspace where they can communicate and collaborate through a single interface.
+- **Experimentation-friendly** — Perfect for developers who like trying different agents and combining their strengths rather than committing to a single ecosystem.
+- **Manager mode** — Keep using your existing agent harnesses while adding orchestration on top, especially useful when working on multiple smaller features or tasks simultaneously.
+- **Native TUI experience** — Configure providers, models, and operating modes directly in the interface with minimal manual setup.
+- **Modular architecture** — Independent, reusable crates for development tools, TUI components, SDK, and memory recall.
+
+## How it differs from other TUI orchestrators
+
+co-sh stands out from other terminal-based agent orchestrators in several key ways:
+
+| Feature | co-sh | Other TUI Orchestrators |
+|---------|-------|------------------------|
+| **Multi-agent split panes** | Run multiple external agents simultaneously in split panes, each with its own session, model, and optional git worktree | Typically single-agent focused or require switching contexts |
+| **Computer tools via accessibility tree** | Reads and operates graphical interfaces through structured representation, falling back to screenshots only when needed | Usually rely on screenshots or lack GUI interaction entirely |
+| **Rust-based TUI** | Built from scratch with Ratatui, inspired by OpenCode's UX | Often web-based terminals or less optimized interfaces |
+| **Configured in-app** | Providers, models, and modes configured directly in the TUI | Often require external config files or CLI flags |
+| **Modular crates** | Development tools, TUI widgets, SDK, and memory recall as independent, reusable libraries | Monolithic architecture with tightly coupled components |
+| **Shared workspace** | Multiple agents collaborate through a single interface with coordinated task dispatching | Agents typically work in isolation |
+
 Highlights:
 
 - **Multi-agent mode (`/agents`)** — run external agents (Gemini, Claude, Codex, Cline, …) alongside the main agent in split panes, all reachable from the same prompt. Each agent keeps its own session, model and optional git worktree, and the main agent coordinates them — dispatching tasks and collecting reports as one team.
