@@ -5,53 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- Manager mode: a coordination mode where the agent plans, delegates and
-  verifies - it cannot write or edit files itself. The mode removes the
-  write/edit tools (`fs_write`, `fs_edit`, `fs_edit_lines`, `fs_ast_edit`)
-  from the tool registration AND denies them at the guardrail (defense in
-  depth); everything else stays, including `fs_rollback` (it only restores
-  a previously recorded version) and the management tools (TODO,
-  sub-agents, `/agents` coworkers, search, skills, LSP, computer).
-
-  - `bash_run` stays exposed, gated by a mode-level command blocklist:
-    anything that mutates the tree is denied, covering file redirections
-    (`2>&1` and `/dev/null` excepted), `tee`, hard-write commands anywhere
-    in the line (`rm`, `cp`, `touch`, …, catching `xargs rm` too),
-    `sed -i[.suffix]`, interpreters with inline code (`python -c`,
-    `node -e`, …), git's state-changing subcommands
-    (`stash list/show/log` stay allowed), `gh` restricted to read paths
-    (`pr view`, `issue list`, …; `api` denied), package managers restricted
-    to build/verify verbs (`cargo fmt` and `clippy --fix` denied, they
-    rewrite sources), and build runners except an explicit `install`
-    target. The blocklist errs toward denial: an over-blocked read costs
-    one rephrase; an under-blocked write defeats the mode. It is a guard
-    for a cooperating model, not a security sandbox - the critical-pattern
-    validation in `cosh_tools::bash` still covers the hostile cases.
-
-  - A dedicated manager system prompt: delegate every implementation,
-    have an agent isolate parallel or risky work in git worktrees,
-    verify everything yourself before accepting, and never deliver
-    without an agent code review - an obsessive cycle until only minor
-    issues remain.
-
-  - Mode-cycle wiring: Tab reaches Manager from Yolo whenever the session
-    has `/agents` panes (split screen open OR parked), replacing the
-    plain-terminal Command mode in that context; the selection persists
-    through `setup.json` (`"manager"`), and the prompt header colors and
-    labels it like the other modes.
-
-  - Permissions behave like Yolo beyond the deny lists: bash reads,
-    `subagent_call`, `computer_act` and `fs_rollback` auto-allow instead of
-    popping an approval dialog like Build. The manager coordinates agents
-    that already run unattended in Yolo, so a dialog would stall the
-    orchestration with a question no one needs to answer; the `/agents`
-    pane wiring treats Manager like Yolo (no permission channel).
+## [0.2.2]
 
 ### Changed
+
+- The `/agents` manager coworker - planning, delegating and verifying while
+  the file work belongs to the agents it drives - has existed since 0.2.0
+  as a pane; this release makes it reachable as a session mode as well.
+  Tab in the mode cycle lands on Manager whenever the session has
+  `/agents` panes (split screen open OR parked), and the selection
+  persists through `setup.json` (`"manager"`). The no-write discipline the
+  pane already carried is enforced at harness depth for the mode too: the
+  write/edit tools (`fs_write`, `fs_edit`, `fs_edit_lines`, `fs_ast_edit`)
+  leave the tool registration AND are denied at the guardrail (defense in
+  depth), `bash_run` stays exposed under the mode-level write blocklist
+  (file redirections `2>&1`/`/dev/null` excepted; `sed -i`, interpreters
+  with inline code, git's state-changing subcommands, `gh` reduced to read
+  paths, package managers to build/verify verbs), the management tools
+  stay (TODO, sub-agents, `/agents` coworkers, search, skills, LSP,
+  computer) alongside `fs_rollback` (it only restores a previously
+  recorded version), the operating contract gains a dedicated system
+  prompt, and permissions behave like Yolo beyond the deny lists: bash
+  reads, `subagent_call`, `computer_act` and `fs_rollback` auto-allow
+  instead of popping an approval dialog like Build.
 
 - The multi-provider LLM connector (client, callers, OAuth device flow,
   cost, discovery, retry and usage) left `cosh-sdk` as the standalone

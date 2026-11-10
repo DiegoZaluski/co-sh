@@ -12,7 +12,7 @@ edition = "2024"
 [dependencies]
 # Unified multi-provider LLM connector (published standalone as `aiface`).
 aiface = "0.1.0"
-cosh-sdk = { path = "../cosh-sdk" }
+cosh-sdk = { path = "../cosh-sdk", version = "0.1.6" }
 schemars = "1"
 thiserror = "2"
 portable-pty = "0.9.0"
@@ -70,6 +70,7 @@ features = ["derive"]
 embed = ["cosh-recall/lancedb"]
 
 [dependencies.cosh-recall]
+version = "0.1.5"
 path = "../cosh-recall"
 optional = true
 features = ["lancedb"]

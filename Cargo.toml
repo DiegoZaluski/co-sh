@@ -36,16 +36,20 @@ categories = ["command-line-utilities"]
 
 [dependencies.cosh-recall]
 path = "crates/cosh-recall"
+version = "0.1.5"
 
 [dependencies.cosh-tools]
 path = "crates/cosh-tools"
+version = "0.1.6"
 
 [dependencies.cosh-onnx]
 path = "crates/cosh-onnx"
+version = "0.1.5"
 optional = true
 
 [dependencies.cosh-tui]
 path = "crates/cosh-tui"
+version = "0.1.6"
 
 [dependencies.fastembed]
 # Pinned to 7: it selects `ort =2.0.0-rc.13` (ndarray, std, api-24), matching
@@ -78,7 +82,7 @@ required-features = ["onnx"]
 serde_json = "1.0"
 # Unified multi-provider LLM connector (published standalone as `aiface`).
 aiface = "0.1.0"
-cosh-sdk = { path = "crates/cosh-sdk" }
+cosh-sdk = { path = "crates/cosh-sdk", version = "0.1.6" }
 # toml = "1.1"
 chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
