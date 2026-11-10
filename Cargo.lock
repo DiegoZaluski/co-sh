@@ -1505,7 +1505,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cosh"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aiface",
  "arboard",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-recall"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aiface",
  "arrow-array",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-sdk"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "ast-grep-core",
  "async-stream",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-tools"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "agent-client-protocol",
  "aiface",

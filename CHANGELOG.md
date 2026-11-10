@@ -44,6 +44,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     through `setup.json` (`"manager"`), and the prompt header colors and
     labels it like the other modes.
 
+  - Permissions behave like Yolo beyond the deny lists: bash reads,
+    `subagent_call`, `computer_act` and `fs_rollback` auto-allow instead of
+    popping an approval dialog like Build. The manager coordinates agents
+    that already run unattended in Yolo, so a dialog would stall the
+    orchestration with a question no one needs to answer; the `/agents`
+    pane wiring treats Manager like Yolo (no permission channel).
+
+### Changed
+
+- The multi-provider LLM connector (client, callers, OAuth device flow,
+  cost, discovery, retry and usage) left `cosh-sdk` as the standalone
+  `aiface` crate, published and consumed as an external dependency.
+  `coshsdk` keeps only the text-processing halves (ast, extract_action,
+  find, hashline) and drops its transport dependencies (reqwest, base64);
+  every consumer - the harness, the TUI, mcp, cosh-tools and cosh-recall's
+  cloud embeddings - imports connector types from `aiface::connector`.
+
+  The same change teaches the agent system prompt that an `fs_write` result
+  carries the updated paragraph tag header the same way an edit tool does,
+  so the agent never re-reads a file just to obtain a tag the previous
+  tool result already provided.
+
 ### Fixed
 
 - The Internal Tools screen's disabled list no longer leaks between projects.
@@ -57,6 +79,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so it survives a restart. While a project has no blocklist file yet, a
   pre-existing global blocklist keeps applying (migration), and the first
   project-scope save takes over from there.
+
+- ACP: a rebooted `/agents` pane resumes its goose session again.
+  Rehydration failed with `ACP session/load failed: Invalid params:
+  "invalid directory path"` - the goose ACP server validates the session
+  cwd with `validate_absolute_cwd` before any replay, rejecting a
+  relative path ("cwd must be an absolute path") and a directory that no
+  longer exists ("invalid directory path"). The panes carried exactly the
+  fragile spelling: worktrees default under the OS temp root
+  (`<temp>/cosh-worktrees`), which a reboot's temp cleaner deletes, and
+  the TUI stores the working directory as the user typed it, which can be
+  relative.
+
+  A `prepare_session_cwd` resolver now sits at the protocol boundary for
+  all three entry points (call, replay, session_snapshot), so every ACP
+  harness benefits, not only goose: an existing directory is
+  canonicalized and the harness receives the resolved absolute spelling.
+  A vanished directory splits by a `CwdStrictness` the caller picks. The
+  read-only passes (replay, session_snapshot) substitute the
+  canonicalized home directory, following the same recovery direction
+  goose itself adopted for loads whose stored cwd is gone, so the
+  session/load is judged on the session id and the transcript replays;
+  each substitution logs a warning. The live turn (call) passes the
+  missing path through untouched and fails loudly at the harness or the
+  sandbox pin instead - silently relocating a turn into the home sandbox
+  would run the agent in `~` without the user ever learning the workspace
+  is gone.
+
+- The Internal Tools screen lists every dispatchable tool. Agent tools
+  (`subagent_status`, `agents_call`, `agents_worktree`, `agents_compact`)
+  were dispatchable and disableable but absent from the list, and a tool
+  the screen does not show is one the user can neither see nor toggle.
+
+- A `/agents` pane stopped with Ctrl+X never resumes in the same frame.
+  Two paths renewed the work under a completed stop: `force_close_pane`
+  ran the queue service right after the cancellation, dispatching the
+  NEXT queued request to the freed pane, and the wake promise drained the
+  cancellation itself as a delivery, starting a synthetic main-agent turn
+  that overrode the interrupt with the report of a turn the user had just
+  killed. `cancel_serving` now drops the freed pane's queued requests (each
+  waiter unblocks with the stop reason) so none is re-dispatched from the
+  queue service, and the wake filters `Cancelled` deliveries out -
+  consumed and discarded, never parked for a later wake. Real reports wake
+  as before; a cancelled one is the user's stop and nothing else.
+
+- The pending-todos steering is a conditional, system-injected steer
+  instead of an unconditional order, and it never reaches the transcript.
+  The wake and the natural-stop gate shared one message whose wording
+  ordered the agent to continue no matter what: an open item can simply
+  be bookkeeping a finished turn left behind, or the user may have taken
+  the work over - an agent told "I'll adjust it manually" still resumed.
+  The text is now short and conditional: continuing is reserved for real
+  remaining work; finished work or a user taking over means reconcile the
+  list with `plan_todo_write` and end the turn. The report obligation of
+  a pane turn stays intact through a cause-specific suffix appended by
+  `resume_pane_turn`. Because the steering went out as a visible user
+  message, a system-injected turn read as a prompt the user never sent -
+  the wake is now skipped from both the transcript push and the mirror
+  input echo, clearing the previous turn's echo so the wake's output
+  never renders under a stale prompt rail, and a wake firing on a keyless
+  install bails while the free-gateway offer is pending.
+
+- The idle main agent wakes on a stale open todo. The improper-stop fix
+  resumed a report-owing pane whose todo list showed open work but left
+  the main agent out: an agent coordinating `/agents` panes parks its
+  turn to be woken later, so a todo that survived a completed main-agent
+  turn was nobody's improper stop - the turn ended, the todo stayed open,
+  and nothing ever revisited it. After a main-agent turn ends, if the
+  persisted todo still has open items and no agent is running anywhere
+  (no main loop, no pane turn, live and parked panes included), the agent
+  starts a fresh turn carrying the same message the harness's
+  natural-stop gate resumes a report-owing turn with; the steering and
+  its open-items listing now live in shared helpers
+  (`todo_rerun_message`/`todo_rerun_open_items`) so the two surfaces
+  cannot drift apart. The wake is bounded and guarded: Command mode must
+  be off (the steering text with free-text item descriptions must never
+  become shell commands), the Queue Actions hold off, the open listing
+  must have changed since the previous wake and a dedicated budget caps
+  the synthetic turns; any non-wake loop start - a user prompt, a queued
+  message or a wake promise - resets the budget and the dedup.
 
 ## [0.2.1]
 

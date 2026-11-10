@@ -6,7 +6,7 @@ license = "Apache-2.0"
 readme = "README.md"
 name = "cosh-recall"
 repository = "https://github.com/DiegoZaluski/co-sh"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [features]
