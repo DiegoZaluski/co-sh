@@ -217,6 +217,22 @@ pub struct AgentPane {
     /// fresh session and THIS is the safety net). Cleared by the dispatch
     /// that consumes it.
     pub worktree_handoff_pending: bool,
+    /// A carried-context block for the pane's NEXT turn, set by a pane
+    /// Revert on a pane whose agent session had to be abandoned (ACP: the
+    /// protocol cannot truncate an agent's own history, so the pane starts
+    /// a FRESH session). It carries the kept prefix so the new session is
+    /// not blind. `None` = nothing to carry. Consumed by the dispatch that
+    /// sends it.
+    pub rewind_context: Option<String>,
+    /// The pane was rewound to a checkpoint: its transcript is now the
+    /// authority and the agent session it ran is ABANDONED. Set by the
+    /// rewind (see `App::rewind_pane_timeline`) and cleared when a real
+    /// turn binds a NEW session. While set, cold-restore REPLAYS are
+    /// refused for this pane: replaying the abandoned session would put
+    /// every rewound turn back on screen — the undo would look like it did
+    /// nothing. It is also what keeps a rebuild-from-metadata (picker
+    /// confirm, hidden-pane restore) from re-binding the old session.
+    pub rewound: bool,
     /// The id of the mode the session currently runs in, from the same
     /// `Modes` report (or a later `CurrentModeUpdate`). Empty without modes.
     pub mode_current: String,
@@ -335,6 +351,8 @@ impl AgentPane {
             agent_modes: None,
             worktree: None,
             worktree_handoff_pending: false,
+            rewind_context: None,
+            rewound: false,
             mode_current: String::new(),
             pending_permission: None,
             permission_tx: None,
@@ -365,9 +383,10 @@ impl AgentPane {
     }
 
     /// The persisted reference for THIS pane: the agent CLI plus the bound
-    /// session when the pane already ran. The inverse of [`Self::from_ref`],
-    /// used when a pane is HIDDEN (its ref moves into the session's hidden
-    /// stack) and when the visible set is written back to metadata.
+    /// session when the pane already ran and the worktree pin when isolated.
+    /// The inverse of [`Self::from_ref`], used when a pane is HIDDEN (its ref
+    /// moves into the session's hidden stack) and when the visible set is
+    /// written back to metadata.
     #[must_use]
     pub fn to_ref(&self) -> crate::types::AgentPaneRef {
         match &self.session_id {
@@ -376,7 +395,18 @@ impl AgentPane {
                 session_id: session_id.clone(),
                 worktree: self.worktree.clone(),
             },
-            None => crate::types::AgentPaneRef::Name(self.agent.clone()),
+            // A sessionless pane still has to carry its pin through the
+            // round trip (a pane isolated before its first turn, and a pane
+            // whose rewind abandoned the session): a bare `Name` would drop
+            // it and move the pane back to the session cwd on the next
+            // restart.
+            None => match &self.worktree {
+                Some(worktree) => crate::types::AgentPaneRef::Unbound {
+                    agent: self.agent.clone(),
+                    worktree: worktree.clone(),
+                },
+                None => crate::types::AgentPaneRef::Name(self.agent.clone()),
+            },
         }
     }
 
@@ -1239,11 +1269,15 @@ impl AgentsSplitState {
             return Some((entries, false));
         }
         let agent = pane.agent.as_str();
-        // cosh's own git-style command, synthesized for EVERY pane kind (the
-        // worktree is a cosh-side binding, never the agent's own command):
-        // same mechanism as the model/mode group entries. Takes arguments
+        // cosh's own commands, synthesized for EVERY pane kind: the worktree
+        // is a cosh-side binding and `/undo` is a cosh-side checkpoint list,
+        // neither of them the agent's own command. Same mechanism as the
+        // model/mode group entries. `/worktree` takes arguments
         // (`/worktree add …`, `/worktree exit`).
-        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = vec![worktree_command_entry()];
+        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = vec![
+            worktree_command_entry(),
+            crate::ui::slash_menu::undo_command_entry(),
+        ];
         entries.extend(
             pane.config_options
                 .as_ref()
@@ -1356,6 +1390,37 @@ impl AgentsSplitState {
         if let Some(p) = self.panes.get_mut(pane) {
             p.running = running;
         }
+    }
+
+    /// Attach (or clear) the carried-context block of pane `pane`'s next
+    /// turn — the pane Revert's rewind handoff (see
+    /// [`AgentPane::rewind_context`]).
+    pub fn set_rewind_context(&mut self, pane: usize, context: Option<String>) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.rewind_context = context;
+        }
+    }
+
+    /// Record (or clear) the pane's post-rewind state — see
+    /// [`AgentPane::rewound`].
+    pub fn set_rewound(&mut self, pane: usize, rewound: bool) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.rewound = rewound;
+        }
+    }
+
+    /// Drop timeline entries from `index` onward — the pane-side Revert
+    /// (everything the user rolled back disappears from the pane). Returns
+    /// whether the index was in range.
+    pub fn truncate_timeline(&mut self, pane: usize, index: usize) -> bool {
+        let Some(p) = self.panes.get_mut(pane) else {
+            return false;
+        };
+        if index > p.activity.timeline.len() {
+            return false;
+        }
+        p.activity.timeline.truncate(index);
+        true
     }
 
     /// Attach a cooperative stop flag to pane `pane`.

@@ -403,7 +403,16 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(_, p)| {
-                        p.session_id.is_some() && p.activity.timeline.is_empty() && !p.rehydrating
+                        // A REWOUND pane is deliberately sessionless-in-spirit:
+                        // its transcript is the authority and the session it
+                        // ran was abandoned. Replaying it here would put the
+                        // rewound turns back on screen (the undo would look
+                        // like a no-op), so the fence wins over the binding
+                        // the persisted metadata still carries.
+                        p.session_id.is_some()
+                            && p.activity.timeline.is_empty()
+                            && !p.rehydrating
+                            && !p.rewound
                     })
                     .map(|(i, _)| i)
                     .collect::<Vec<usize>>()
@@ -824,14 +833,21 @@ impl App {
         // promotion — the gate-free absorb pass included — lands HERE, so
         // there is exactly one live-pane write outside that pre-dispatch
         // necessity. Deduped: a pane already carrying the id is untouched.
-        if live_session.as_deref() != Some(session_id.as_str())
-            && let Some(split) = super::agents_dispatch::either_split_mut(
-                &mut self.agents_split,
-                &mut self.parked_agents_split,
-            )
-            && let Some(p) = split.panes.get_mut(pane)
+        if let Some(split) = super::agents_dispatch::either_split_mut(
+            &mut self.agents_split,
+            &mut self.parked_agents_split,
+        ) && let Some(p) = split.panes.get_mut(pane)
         {
-            p.session_id = Some(session_id.clone());
+            if live_session.as_deref() != Some(session_id.as_str()) {
+                p.session_id = Some(session_id.clone());
+            }
+            // A real session is bound to the pane, so the pane speaks again:
+            // the post-rewind fence is over (its abandoned session can never
+            // come back — this binding replaced it). Deliberately OUTSIDE the
+            // dedupe: the Done handler seeds the live pane's resume id BEFORE
+            // calling this helper, so a clear inside the guard would never
+            // run and the fence would stay up for the rest of the session.
+            p.rewound = false;
         }
         let Some(session) = self.state.current_session_mut() else {
             return;

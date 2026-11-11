@@ -1346,7 +1346,7 @@ impl App {
         // config (only when the focused pane IS the manager pane — the connector
         // resolution runs lazily so a split of ACP agents alone never
         // computes it).
-        let Some((agent, resume, picks, pane_cwd, handoff, coworker_identity)) =
+        let Some((agent, resume, picks, pane_cwd, handoff, rewind, coworker_identity)) =
             either_split(&self.agents_split, &self.parked_agents_split)
                 .and_then(|split| split.panes.get(pane))
                 .map(|p| {
@@ -1396,6 +1396,11 @@ impl App {
                         // resume-with-new-cwd is the failure mode it nets).
                         p.worktree_handoff_pending
                             .then(|| pane_handoff_summary(&p.activity.timeline)),
+                        // The REWIND handoff: a pane Revert that had to
+                        // abandon the agent session (ACP) leaves the kept
+                        // prefix here, so the fresh session starts
+                        // oriented instead of blind.
+                        p.rewind_context.clone(),
                         p.id,
                     )
                 })
@@ -1453,6 +1458,7 @@ impl App {
         // above — a refused turn must not write to the timeline either.
         // The echo goes wherever the pane lives (live or parked).
         let handoff_consumed = handoff.is_some();
+        let rewind_consumed = rewind.is_some();
         if let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
         {
             split.echo_turn_input(pane, &msg, !from_agent);
@@ -1461,6 +1467,11 @@ impl App {
             // re-flags it).
             if handoff_consumed {
                 split.set_worktree_handoff_pending(pane, false);
+            }
+            // The rewind block is a one-shot too: it repaired the FIRST
+            // post-revert prompt (the fresh session's opening context).
+            if rewind_consumed {
+                split.set_rewind_context(pane, None);
             }
         }
         // The pane's assembly inputs come from the SAME user config the
@@ -1754,8 +1765,29 @@ impl App {
                     cwd.display()
                 )
             });
+            // A pane Revert on an ACP pane abandons the agent's session
+            // (the protocol has no way to truncate it) and leaves the kept
+            // prefix here: this turn opens a FRESH session, so the block is
+            // its only memory.
+            let rewind_block = rewind.map(|summary| {
+                format!(
+                    "[conversation rewound] The user rolled this conversation back to an \
+                     earlier point. Everything after that point was discarded — treat the \
+                     history below as the whole conversation so far:\n\n{summary}\n\n"
+                )
+            });
+            // Both blocks can be pending on the same turn (a revert right
+            // after a worktree move, before the first turn), and each says
+            // something the other does not: WHERE the pane works, and WHAT
+            // the conversation is. Carry both — the flags below are cleared
+            // because the text really rode out, so dropping one here would
+            // lose it for good.
+            let carried_block = match (handoff_block, rewind_block) {
+                (Some(handoff), Some(rewind)) => Some(format!("{handoff}{rewind}")),
+                (handoff, rewind) => rewind.or(handoff),
+            };
             let input = assemble_pane_input(
-                handoff_block,
+                carried_block,
                 cosh::harness::agent_coworkers::take_preamble(coworker_identity),
                 msg,
             );
@@ -2603,6 +2635,14 @@ impl App {
     /// stays on its empty live timeline; the next prompt falls back to
     /// `session/new` through the normal turn path.
     pub(super) fn dispatch_agents_pane_replay(&mut self, pane: usize) {
+        // A rewound pane must never rehydrate the session it abandoned (the
+        // replay would restore every turn the undo removed).
+        if either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.panes.get(pane))
+            .is_some_and(|p| p.rewound)
+        {
+            return;
+        }
         let Some(session_id) = self
             .agents_split
             .as_ref()
@@ -2806,7 +2846,7 @@ fn pane_handoff_summary_line(entry: &SubagentTimelineEntry) -> Option<String> {
 /// few meaningful entries (`pane_handoff_summary_line`), newest last — the
 /// same order the pane renders. An empty or all-noise timeline yields an
 /// empty string: the block still announces the move, just carries nothing.
-fn pane_handoff_summary(timeline: &[SubagentTimelineEntry]) -> String {
+pub(in crate::app) fn pane_handoff_summary(timeline: &[SubagentTimelineEntry]) -> String {
     const MAX_ENTRIES: usize = 12;
     timeline
         .iter()
@@ -3415,7 +3455,7 @@ fn run_manager_turn(
 /// cancelled-run debris and compaction boundaries only hide items from the
 /// MODEL — the user watched every one of them stream into the pane, so the
 /// rebuilt timeline keeps them; masking likewise never rewrote the row.
-fn manager_context_replay_events(
+pub(in crate::app) fn manager_context_replay_events(
     context: &cosh::harness::context::ContextManagerState,
 ) -> Vec<SubagentEvent> {
     use cosh::harness::context::ContextItem;
@@ -3516,44 +3556,135 @@ fn manager_context_replay_events(
     events
 }
 
-fn manager_context_display(
+/// Project a manager context snapshot into the DISPLAY messages the session
+/// store persists: ONE message per context item GROUP, using the shared rule
+/// [`cosh::harness::context::display_groups`] that the store's `update_ctx_ids`
+/// also derives its mapping from (a tool call absorbs every result carrying
+/// its `call_id`; every other item is a message of its own).
+///
+/// The 1:1 GROUP↔MESSAGE invariant is load-bearing, not cosmetic: the store
+/// only records a message → context boundary when the display projection
+/// lines up with the context groups, and Revert/Fork resolve a clicked
+/// message id through those boundaries. The old prose-only projection
+/// (User/Assistant/Closure, tool calls dropped) broke the invariant on any
+/// turn that used a tool, so `update_ctx_ids` refused to guess and left the
+/// map empty — every Revert/Fork on a real manager session failed with
+/// "Could not record the revert" / "Could not create the branch".
+///
+/// The projection is also what the history view shows when the manager
+/// session is reopened as a normal chat, so tool rows belong here anyway.
+pub(in crate::app) fn manager_context_display(
     context: &cosh::harness::ContextManagerState,
-) -> Vec<(crate::types::MessageRole, String, Option<String>)> {
-    context
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            cosh::harness::context::ContextItem::User { original, .. } => {
-                Some((crate::types::MessageRole::User, original.clone(), None))
-            }
-            cosh::harness::context::ContextItem::Assistant {
-                original,
-                reasoning,
-                ..
-            } => Some((
-                crate::types::MessageRole::Assistant,
-                original.clone(),
-                reasoning.clone(),
-            )),
-            cosh::harness::context::ContextItem::Closure {
-                content, reasoning, ..
-            } => Some((
-                crate::types::MessageRole::Assistant,
-                content.clone(),
-                reasoning.clone(),
-            )),
-            _ => None,
+) -> Vec<(crate::types::MessageRole, Vec<crate::types::Part>)> {
+    use crate::types::{MessageRole, Part, ReasoningPart, TextPart, ToolPart, ToolStatus};
+    use cosh::harness::context::ContextItem;
+
+    fn text_part(text: &str) -> Part {
+        Part::Text(TextPart {
+            text: text.to_string(),
+            synthetic: false,
         })
-        .collect()
+    }
+
+    /// Reasoning precedes the text, mirroring the live timeline's arrival order
+    /// (`push_reasoning` before the text tokens). `None` reasoning emits no
+    /// part, so reasoning-less turns persist as before.
+    fn push_text(parts: &mut Vec<Part>, text: &str, reasoning: Option<&String>) {
+        if let Some(reasoning) = reasoning.filter(|r| !r.is_empty()) {
+            parts.push(Part::Reasoning(ReasoningPart {
+                text: reasoning.clone(),
+                collapsed: true,
+            }));
+        }
+        parts.push(text_part(text));
+    }
+
+    let mut display: Vec<(MessageRole, Vec<Part>)> = Vec::new();
+    for group in cosh::harness::context::display_groups(context) {
+        // The group's FIRST item sets the role: compaction and commands read
+        // as user turns (the model-visible checkpoint prose included), a tool
+        // call and its results (or an orphan result) as assistant output.
+        let role = match group[0] {
+            ContextItem::User { .. }
+            | ContextItem::Compaction { .. }
+            | ContextItem::UserCommand { .. } => MessageRole::User,
+            _ => MessageRole::Assistant,
+        };
+        let mut parts: Vec<Part> = Vec::new();
+        for item in group {
+            match item {
+                ContextItem::User { original, .. } => parts.push(text_part(original)),
+                ContextItem::Compaction { summary, .. } => parts.push(text_part(summary)),
+                ContextItem::UserCommand { content, .. } => parts.push(text_part(content)),
+                ContextItem::Error { content, .. } => parts.push(text_part(content)),
+                ContextItem::Assistant {
+                    original,
+                    reasoning,
+                    ..
+                } => push_text(&mut parts, original, reasoning.as_ref()),
+                ContextItem::Closure {
+                    content, reasoning, ..
+                } => push_text(&mut parts, content, reasoning.as_ref()),
+                ContextItem::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    let input = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+                    parts.push(Part::Tool(ToolPart {
+                        tool: name.clone(),
+                        input,
+                        output: None,
+                        status: ToolStatus::Completed,
+                        tool_call_id: Some(call_id.clone()),
+                        is_start: true,
+                        is_streaming: false,
+                        cached_line_count: None,
+                        lsp_notes: None,
+                    }));
+                }
+                // Same group as its call (the shared rule pairs them), so the
+                // output lands on that call's part instead of a message of
+                // its own. An orphan result has no tool part to land on: it
+                // stays prose, exactly as the mapper counts it.
+                ContextItem::ToolResult { content, .. } => {
+                    match parts.iter_mut().find(|part| matches!(part, Part::Tool(_))) {
+                        Some(Part::Tool(tool)) => {
+                            tool.output = Some(match tool.output.take() {
+                                Some(previous) => format!("{previous}\n{content}"),
+                                None => content.clone(),
+                            });
+                        }
+                        _ => parts.push(text_part(content)),
+                    }
+                }
+            }
+        }
+        display.push((role, parts));
+    }
+    // A call whose result never arrived was cut off mid-dispatch (the turn
+    // was interrupted): it is the LAST item of the snapshot, so leaving it
+    // `Completed` would claim an outcome that never happened. A call in the
+    // MIDDLE without a result lost it to a sweep — those did complete, so
+    // only the trailing one is demoted.
+    if let Some(ContextItem::ToolCall { .. }) = context.items.back()
+        && let Some((_, parts)) = display.last_mut()
+        && let Some(Part::Tool(tool)) = parts.iter_mut().find(|part| matches!(part, Part::Tool(_)))
+        && tool.output.is_none()
+    {
+        tool.status = ToolStatus::Running;
+    }
+    display
 }
 
 /// Persist one manager turn: load the session shell (for `created_at`),
 /// replace its display messages with the fresh projection, and enqueue the
 /// save with the context snapshot. A missing shell (first turn) builds one.
-fn persist_manager_session(
+pub(in crate::app) fn persist_manager_session(
     store: &crate::session::store::SessionStore,
     session_id: &str,
-    display: Vec<(crate::types::MessageRole, String, Option<String>)>,
+    display: Vec<(crate::types::MessageRole, Vec<crate::types::Part>)>,
     context: cosh::harness::ContextManagerState,
 ) {
     let created_at = std::time::SystemTime::now()
@@ -3577,33 +3708,18 @@ fn persist_manager_session(
             ctx_ids: std::collections::HashMap::new(),
             main_agent_worktree: None,
         });
+    // The projection is already grouped one-message-per-context-group (see
+    // `manager_context_display`), so the ids are purely positional.
     session.messages = display
         .into_iter()
         .enumerate()
-        .map(|(i, (role, text, reasoning))| {
-            // Reasoning precedes the text, mirroring the live timeline's
-            // arrival order (`push_reasoning` before the text tokens).
-            // `None` reasoning emits no part, so reasoning-less turns
-            // persist exactly as before (byte-identical messages).
-            let mut parts = Vec::new();
-            if let Some(reasoning) = reasoning.filter(|r| !r.is_empty()) {
-                parts.push(crate::types::Part::Reasoning(crate::types::ReasoningPart {
-                    text: reasoning,
-                    collapsed: true,
-                }));
-            }
-            parts.push(crate::types::Part::Text(crate::types::TextPart {
-                text,
-                synthetic: false,
-            }));
-            crate::types::Message {
-                id: format!("msg-{i}"),
-                role,
-                parts,
-                created_at: 0,
-                agent: None,
-                model: None,
-            }
+        .map(|(i, (role, parts))| crate::types::Message {
+            id: format!("msg-{i}"),
+            role,
+            parts,
+            created_at: 0,
+            agent: None,
+            model: None,
         })
         .collect();
     store.save_session_async_with_context(&mut session, context);

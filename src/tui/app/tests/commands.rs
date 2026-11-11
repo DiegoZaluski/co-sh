@@ -3351,8 +3351,12 @@ async fn slash_worktree_add_pins_the_pane_and_persists_the_binding() {
     let panes = panes.expect("the split stays open");
     assert_eq!(
         panes[0],
-        crate::types::AgentPaneRef::Name("claude".into()),
-        "an unbound pane keeps the Name shape — the worktree rides the in-memory pane and the NEXT Bound promotion"
+        crate::types::AgentPaneRef::Unbound {
+            agent: "claude".into(),
+            worktree: pin.clone(),
+        },
+        "an unbound pane keeps its worktree pin — a restart rebuilds the pane \
+         still isolated, so the next turn cannot silently run in the session cwd"
     );
 
     // The main agent's registry knows the pane's worktree (context block).

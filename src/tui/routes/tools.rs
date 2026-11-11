@@ -35,11 +35,7 @@ fn project_tools_path(cwd: &str) -> PathBuf {
 ///   the first project-scope save takes over from there. A corrupt file
 ///   fails open (nothing disabled) rather than blocking the session.
 #[must_use]
-pub fn load_disabled_tools(
-    setup: &cosh::setup::Setup,
-    cwd: &str,
-    global: bool,
-) -> HashSet<String> {
+pub fn load_disabled_tools(setup: &cosh::setup::Setup, cwd: &str, global: bool) -> HashSet<String> {
     if global {
         return setup.tools.disabled.iter().cloned().collect();
     }
@@ -97,11 +93,7 @@ pub fn save_disabled_tools(
 ///   survives a restart even before any tool is toggled in that scope.
 /// - Tool row: persist the set to the active scope (`setup.json` when
 ///   global, `<cwd>/.cosh-tools.json` otherwise).
-pub fn toggle_entry(
-    view: &mut InternalToolsView,
-    setup: &mut cosh::setup::Setup,
-    cwd: &str,
-) {
+pub fn toggle_entry(view: &mut InternalToolsView, setup: &mut cosh::setup::Setup, cwd: &str) {
     let scope_row = view.selection.selected_index == GLOBAL_ROW_INDEX;
     view.toggle_current();
     if scope_row {
@@ -300,7 +292,7 @@ impl InternalToolsView {
         if !hit {
             return None;
         }
-            for i in 0..count {
+        for i in 0..count {
             // The Global row scrolls with the list like any other row, so
             // the render, the hit-test and the selection window all agree:
             // row j shows selection index scroll_offset + j.
@@ -400,7 +392,11 @@ impl InternalToolsView {
                     "Apply the disabled tools to every project (OFF = this project only)"
                         .to_string(),
                     if self.global { "✔" } else { "✗" },
-                    if self.global { Color::Green } else { Color::Red },
+                    if self.global {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    },
                 )
             } else {
                 let (name, desc) = internal_tools()[idx - 1];
@@ -669,7 +665,10 @@ mod tests {
 
         // A fresh load for the SAME cwd reads the project file.
         let reloaded = load_disabled_tools(&setup, &cwd, false);
-        assert!(reloaded.contains("bash_run"), "the project file must persist");
+        assert!(
+            reloaded.contains("bash_run"),
+            "the project file must persist"
+        );
         assert!(
             !reloaded.contains("web_fetch"),
             "the project scope must not inherit the global set once it saved its own"

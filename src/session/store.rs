@@ -806,13 +806,10 @@ impl SessionStore {
     /// Compute the message id → context item ids mapping for a session against
     /// a context snapshot, and store it in `session.ctx_ids`.
     ///
-    /// The grouping mirrors the display renderer's expectations exactly: each
-    /// `User` item is its own message; a `ToolCall` opens an assistant message
-    /// that absorbs every `ToolResult` carrying its `call_id` (matched
-    /// order-independently, so interleaved parallel chains group correctly; an
-    /// orphan result renders as a message of its own, exactly like the display);
-    /// a text-ish item (`Assistant` / `Closure` / `Compaction` / `Error`) is a
-    /// message of its own.
+    /// The grouping is [`crate::harness::context::display_groups`] — the same
+    /// rule `tui::app::agents_dispatch::manager_context_display` projects the
+    /// manager pane's messages with, so the two can never disagree on where a
+    /// message boundary falls.
     ///
     /// Conservative: if the group count does not match the message count the
     /// mapping is left UNCHANGED — bookkeeping must never corrupt itself by
@@ -821,31 +818,10 @@ impl SessionStore {
     /// lives; the guard is a safety net against streaming races and future
     /// mutation sites that break the invariant.
     fn update_ctx_ids(session: &mut Session, context: &ContextManagerState) {
-        let mut groups: Vec<Vec<u64>> = Vec::new();
-        let mut call_group: HashMap<&str, usize> = HashMap::new();
-        for item in &context.items {
-            match item {
-                ContextItem::User { id, .. } => groups.push(vec![*id]),
-                ContextItem::ToolCall { id, call_id, .. } => {
-                    call_group.insert(call_id.as_str(), groups.len());
-                    groups.push(vec![*id]);
-                }
-                ContextItem::ToolResult { id, call_id, .. } => {
-                    match call_group.get(call_id.as_str()) {
-                        Some(&group_idx) => groups[group_idx].push(*id),
-                        None => groups.push(vec![*id]),
-                    }
-                }
-                ContextItem::Assistant { id, .. }
-                | ContextItem::Closure { id, .. }
-                | ContextItem::Compaction { id, .. }
-                | ContextItem::Error { id, .. }
-                // UserCommand items are display-only timeline entries; they
-                // still occupy one display-message group so the group↔
-                // message count invariant holds in Command mode.
-                | ContextItem::UserCommand { id, .. } => groups.push(vec![*id]),
-            }
-        }
+        let groups: Vec<Vec<u64>> = crate::harness::context::display_groups(context)
+            .into_iter()
+            .map(|group| group.iter().map(|item| item.id()).collect())
+            .collect();
 
         if groups.len() != session.messages.len() {
             log::warn!(
@@ -1197,8 +1173,9 @@ impl SessionStore {
     /// back-reference, so "is this session depended on?" is answered by
     /// scanning the parents, never the session itself. Tombstoned parents
     /// do not count — deleting the parent is exactly what frees its panes.
-    /// Unbound panes (`AgentPaneRef::Name`) link nothing: they never ran,
-    /// so there is no session behind them to protect.
+    /// Unbound panes (`AgentPaneRef::Name`, or `Unbound` — a worktree pin
+    /// without a session) link nothing: they never ran (or their rewind
+    /// abandoned the session), so there is no session behind them to protect.
     pub fn linked_agents_pane_sessions(&self) -> HashSet<String> {
         let mut linked = HashSet::new();
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {

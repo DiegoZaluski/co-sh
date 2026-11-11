@@ -261,6 +261,38 @@ impl ContextItem {
     }
 }
 
+/// The DISPLAY grouping of a snapshot: one group per display message, with a
+/// tool call absorbing every result that carries its `call_id`.
+///
+/// This is the whole rule, in one place, because two consumers must agree on
+/// it exactly: the session store's `ctx_ids` mapper (one group → one message's
+/// item ids) and the agents manager's persisted projection (one group → one
+/// message's parts). A group that differs by one breaks the message ↔ context
+/// mapping the Revert/Fork actions resolve by, so neither side reimplements
+/// it.
+///
+/// `ToolCall` opens its group in arrival order but results are matched by
+/// `call_id`, so interleaved parallel chains still group correctly; a result
+/// whose call is gone (swept or hidden) is a group of its own.
+pub fn display_groups(state: &ContextManagerState) -> Vec<Vec<&ContextItem>> {
+    let mut groups: Vec<Vec<&ContextItem>> = Vec::new();
+    let mut call_group: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for item in &state.items {
+        match item {
+            ContextItem::ToolCall { call_id, .. } => {
+                call_group.insert(call_id.as_str(), groups.len());
+                groups.push(vec![item]);
+            }
+            ContextItem::ToolResult { call_id, .. } => match call_group.get(call_id.as_str()) {
+                Some(&group) => groups[group].push(item),
+                None => groups.push(vec![item]),
+            },
+            _ => groups.push(vec![item]),
+        }
+    }
+    groups
+}
+
 // LLM compaction (the last-resort fallback, driven by the harness)
 
 /// Snapshot of context manager state, carried by the harness events

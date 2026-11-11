@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 /// once the pane completed a turn — WHICH ACP session to resume, so a
 /// reopened session (or app) continues the SAME agent context instead of
 /// forking a fresh one. Serialized untagged: `Name` is a bare JSON string,
-/// byte-identical with the pre-binding histories; `Bound` is a small object
-/// only newer writers emit.
+/// byte-identical with the pre-binding histories; `Bound`/`Unbound` are
+/// small objects only newer writers emit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AgentPaneRef {
@@ -26,6 +26,24 @@ pub enum AgentPaneRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree: Option<crate::git::worktree::PaneWorktree>,
     },
+    /// A pane with NO agent session but WITH a worktree pin: either a pane
+    /// the user isolated before its first turn, or a pane that was REWOUND.
+    /// A rewind abandons the agent session (ACP cannot truncate) and the
+    /// abandoned id must never be resumed, but the pin outlives both — a
+    /// plain `Name` would drop it and silently move the pane back to the
+    /// session cwd on the next restart.
+    ///
+    /// The pin is REQUIRED, not optional: an object with only a name stays
+    /// data corruption (`Name` is the string shape), and it keeps this
+    /// variant from swallowing the `Bound`-objects-without-session shapes
+    /// the untagged repr must keep rejecting.
+    ///
+    /// Kept AFTER [`Self::Bound`]: the untagged representation ignores
+    /// unknown fields, so a `Bound` object would otherwise match here.
+    Unbound {
+        agent: String,
+        worktree: crate::git::worktree::PaneWorktree,
+    },
 }
 
 /// How many pending-todos auto-wakes the main agent may receive before the
@@ -43,7 +61,7 @@ impl AgentPaneRef {
     pub fn agent(&self) -> &str {
         match self {
             Self::Name(agent) => agent,
-            Self::Bound { agent, .. } => agent,
+            Self::Bound { agent, .. } | Self::Unbound { agent, .. } => agent,
         }
     }
 
@@ -51,19 +69,21 @@ impl AgentPaneRef {
     #[must_use]
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::Name(_) => None,
+            Self::Name(_) | Self::Unbound { .. } => None,
             Self::Bound { session_id, .. } => Some(session_id),
         }
     }
 
     /// The worktree the pane is pinned to, when isolated. `None` for a
-    /// fresh pane and for a bound pane written before worktrees existed
-    /// (the `#[serde(default)]` field loads as `None` there).
+    /// name-only pane and for a [bound](Self::Bound) pane written before
+    /// worktrees existed (the `#[serde(default)]` field loads as `None`
+    /// there). Survives a rewind ([`Self::Unbound`]).
     #[must_use]
     pub fn worktree(&self) -> Option<&crate::git::worktree::PaneWorktree> {
         match self {
             Self::Name(_) => None,
             Self::Bound { worktree, .. } => worktree.as_ref(),
+            Self::Unbound { worktree, .. } => Some(worktree),
         }
     }
 }
@@ -756,5 +776,31 @@ mod tests {
             !bare_json.contains("worktree"),
             "None must be skipped, not serialized as null: {bare_json:?}"
         );
+    }
+
+    /// A sessionless pane keeps its worktree pin through the round trip: a
+    /// pane whose rewind abandoned the agent session (and a pane isolated
+    /// before its first turn) has nothing to resume, and the bare `Name`
+    /// shape would drop the pin on the next restart.
+    #[test]
+    fn unbound_pane_keeps_its_worktree_pin() {
+        let pinned = AgentPaneRef::Unbound {
+            agent: "claude".to_string(),
+            worktree: crate::git::worktree::PaneWorktree {
+                path: "/tmp/cosh-worktrees/fix".into(),
+                branch: "fix".to_string(),
+                name: "fix".to_string(),
+                assigned_by: crate::git::worktree::AssignedBy::User,
+            },
+        };
+        let json = serde_json::to_string(&pinned).expect("serialize");
+        let back: AgentPaneRef = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, pinned);
+        assert_eq!(back.session_id(), None, "no session to resume");
+        assert_eq!(back.worktree().map(|w| w.branch.as_str()), Some("fix"));
+        assert_eq!(back.agent(), "claude");
+        // An object without the pin is still data corruption, never an
+        // unbound pane: the required field keeps the untagged repr strict.
+        assert!(serde_json::from_str::<AgentPaneRef>(r#"{"agent":"claude"}"#).is_err());
     }
 }

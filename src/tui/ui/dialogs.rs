@@ -709,6 +709,12 @@ pub enum DialogType {
         session_id: String,
         /// `(undo_label, prompt_preview)` per revert, oldest first.
         versions: Vec<(String, String)>,
+        /// `Some(pane)` when the list holds an `/agents` ACP pane's
+        /// CHECKPOINTS instead of a cosh session's revert references: the
+        /// pane has no store session to roll back (its `session_id` is the
+        /// agent's), so a pick rewinds the pane's own transcript instead.
+        /// `None` = the native, store-backed list.
+        pane: Option<usize>,
     },
 
     /// Action picker for a PENDING queued message (the rows above the
@@ -956,9 +962,11 @@ impl std::fmt::Debug for DialogType {
             Self::UndoList {
                 session_id,
                 versions,
+                pane,
             } => f
                 .debug_struct("UndoList")
                 .field("session_id", session_id)
+                .field("pane", pane)
                 // The previews are user-typed prompt text — same redaction
                 // policy as every other user-content field.
                 .field(

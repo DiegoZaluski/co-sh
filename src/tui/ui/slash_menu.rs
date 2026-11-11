@@ -143,6 +143,22 @@ pub fn worktree_command_entry() -> SlashCommand {
     }
 }
 
+/// The `/undo` slash entry for an ACP PANE's menu.
+///
+/// `/undo` is a Global-scoped command (the App handles it, never the pane),
+/// but an ACP pane's menu is built from its OWN published commands — the
+/// harness has no notion of cosh checkpoints and never lists it. The entry is
+/// therefore synthesized for every ACP pane, exactly like `/worktree`; the
+/// manager pane gets `/undo` from the base list and must not append a second
+/// copy. Picking it with an ACP pane focused opens that pane's checkpoints.
+#[must_use]
+pub fn undo_command_entry() -> SlashCommand {
+    SlashCommand {
+        name: "undo".into(),
+        desc: "Rewind this agent's conversation to a checkpoint".into(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashMenuMouseAction {
     None,

@@ -1625,7 +1625,6 @@ impl App {
                                 // Copy EVERYTHING out of the immutable
                                 // `d` borrow before popping the dialog.
                                 let message_id = message_id.clone();
-                                let is_user_message = *is_user_message;
                                 let pane_action = *pane_action;
                                 self.dialog.pop();
                                 match pane_action {
@@ -1635,7 +1634,6 @@ impl App {
                                             pane,
                                             user_ordinal,
                                             timeline_index,
-                                            is_user_message,
                                         );
                                     }
                                     None => self.run_message_action(action, &message_id),
@@ -1645,12 +1643,17 @@ impl App {
                             DialogType::UndoList {
                                 session_id,
                                 versions,
+                                pane,
                             } => {
-                                let (session_id, versions) = (session_id.clone(), versions.clone());
+                                let (session_id, versions, pane) =
+                                    (session_id.clone(), versions.clone(), *pane);
                                 let selected = d.selected.min(versions.len().saturating_sub(1));
                                 self.dialog.pop();
                                 let (label, _) = &versions[selected];
-                                self.restore_undo_version(&session_id, label);
+                                match pane {
+                                    Some(pane) => self.restore_pane_checkpoint(pane, label),
+                                    None => self.restore_undo_version(&session_id, label),
+                                }
                                 return Ok(true);
                             }
                             DialogType::QueueActions { queue, index, .. } => {

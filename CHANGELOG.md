@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Revert, Copy and Fork now answer for `/agents` pane messages, routed by
+  what backs the pane. A cosh pane runs the store's branch machinery over
+  its own session, so a revert really truncates what the next turn sends
+  and the transcript is rebuilt from the kept context. An ACP pane runs
+  them over its own transcript: Revert drops the clicked prompt and
+  everything after it, hands the prompt back for editing and opens a
+  fresh agent session primed with the kept prefix (the protocol cannot
+  truncate an agent's history); Fork branches a new cosh session from
+  that prefix. Copy now also works on an agent's replies.
+
+- `/undo` on a focused ACP pane lists that pane's checkpoints - one per
+  user prompt, newest selected - and rewinds to the picked one. The
+  native, store-backed list is unchanged and still answers for the cosh
+  pane, whose conversation is a real session.
+
+### Fixed
+
+- Revert and Fork on the `/agents` cosh pane no longer fail with "Could
+  not record the revert" / "Could not create the branch". The pane's
+  persisted display carried only prompts and replies, so any turn that
+  used a tool broke the message-context group count the store requires
+  and left the mapping empty. The projection now emits one message per
+  context group - tool calls absorbing their results, a trailing call
+  whose result never arrived shown as running - which also brings the
+  tool rows back when a manager session is reopened as a chat.
+
+- A rewound `/agents` pane no longer keeps the post-rewind fence forever.
+  A real session binding lifts it, so the pane speaks again on the first
+  turn after the rebind instead of staying silent for the rest of the
+  session.
+
+- A pane rewound by Revert or `/undo` keeps its worktree pin across a
+  restart. The persisted reference only knew "agent name" and "agent
+  name + session", so a sessionless pane wrote a bare name and came back
+  in the session's directory; a pin without a session is now carried as
+  its own reference, with the pin required so a malformed name-only
+  object still fails to parse.
+
+- A cosh pane whose stored session cannot be read is refused ("Could not
+  load this pane's session.") instead of being treated as an ACP pane,
+  which silently dropped the binding and rewrote the pane as unbound.
+
 ## [0.2.2]
 
 ### Changed
