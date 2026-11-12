@@ -1093,6 +1093,30 @@ impl App {
         self.slash_menu.update(&self.prompt_view.input);
     }
 
+    /// Seed/refresh the in-memory input history for the current session.
+    /// Rebuilds from the session's user messages when the session changes.
+    pub(crate) fn ensure_input_history(&mut self) {
+        let sid = self.state.current_session_id.clone();
+        if self.input_history_session != sid {
+            self.input_history = self
+                .state
+                .current_session()
+                .map(crate::component::prompt::PromptView::user_message_texts)
+                .unwrap_or_default();
+            self.input_history_session = sid;
+        }
+    }
+
+    /// Record a user input (principal or pane dispatch) into the in-memory
+    /// history, in send order. Does not touch the session transcript, so the
+    /// main agent's flow is unaffected.
+    pub(crate) fn record_user_input(&mut self, text: &str) {
+        self.ensure_input_history();
+        if !text.trim().is_empty() {
+            self.input_history.push(text.to_string());
+        }
+    }
+
     /// Force-close ONE pane's turn (the Ctrl+X interrupt): the pane goes
     /// idle, its timeline closes with a `[turn cancelled]` marker carrying
     /// `reason`, its in-flight `agents_call` request fails (the requester's
@@ -1328,6 +1352,7 @@ impl App {
             });
             return;
         }
+        self.record_user_input(&msg);
         self.dispatch_to_pane(focused, msg, false);
     }
 

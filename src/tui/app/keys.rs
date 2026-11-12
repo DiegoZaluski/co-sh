@@ -5,7 +5,6 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{App, AppMode, PendingSessionDelete};
-use crate::component::prompt::PromptView;
 use crate::fallback;
 use crate::left_panel::sessions::SessionsAction;
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
@@ -1905,20 +1904,14 @@ impl App {
                 }
                 Some(crate::keymap::Action::HistoryUp) => {
                     self.prompt_view.note_activity();
-                    let user_msgs = self
-                        .state
-                        .current_session()
-                        .map(PromptView::user_message_texts)
-                        .unwrap_or_default();
+                    self.ensure_input_history();
+                    let user_msgs = self.input_history.clone();
                     self.prompt_view.history_up(&user_msgs);
                 }
                 Some(crate::keymap::Action::HistoryDown) => {
                     self.prompt_view.note_activity();
-                    let user_msgs = self
-                        .state
-                        .current_session()
-                        .map(PromptView::user_message_texts)
-                        .unwrap_or_default();
+                    self.ensure_input_history();
+                    let user_msgs = self.input_history.clone();
                     self.prompt_view.history_down(&user_msgs);
                 }
                 None => {
@@ -1945,11 +1938,8 @@ impl App {
                                     if self.prompt_view.input.is_empty()
                                         || self.prompt_view.cursor_at_head(text_w)
                                     {
-                                        let user_msgs = self
-                                            .state
-                                            .current_session()
-                                            .map(PromptView::user_message_texts)
-                                            .unwrap_or_default();
+                                        self.ensure_input_history();
+                                        let user_msgs = self.input_history.clone();
                                         self.prompt_view.history_up(&user_msgs);
                                     } else {
                                         self.prompt_view.note_activity();
@@ -1980,11 +1970,8 @@ impl App {
                                     if self.prompt_view.input.is_empty()
                                         || self.prompt_view.cursor_at_tail(text_w)
                                     {
-                                        let user_msgs = self
-                                            .state
-                                            .current_session()
-                                            .map(PromptView::user_message_texts)
-                                            .unwrap_or_default();
+                                        self.ensure_input_history();
+                                        let user_msgs = self.input_history.clone();
                                         self.prompt_view.history_down(&user_msgs);
                                     } else {
                                         self.prompt_view.note_activity();

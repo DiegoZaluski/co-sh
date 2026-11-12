@@ -249,6 +249,7 @@ impl App {
     /// text was changed, since editing is the whole point. Choosing the
     /// other queue (or a stale cross-session hint) appends at the end.
     pub(in crate::app) fn enqueue_pending_message(&mut self, target: QueueTarget, text: String) {
+        self.record_user_input(&text);
         let current = self.state.current_session_id.clone();
         let hint = self.edit_requeue_hint.take();
         // A hint from another session is meaningless here: drop it and send
@@ -301,6 +302,7 @@ impl App {
                 // Plain submission (no edited message in flight here).
                 self.edit_requeue_hint = None;
                 self.edit_hold_queue = None;
+                self.record_user_input(&text);
                 self.start_agent_loop(text);
                 return;
             }
