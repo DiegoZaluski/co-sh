@@ -161,6 +161,12 @@ impl App {
             if key.code == KeyCode::Esc
                 && self.state.status == crate::types::SessionStatus::Working
                 && !self.modal_box_open()
+                // Only the Session screen owns the "Esc interrupts the
+                // running agent" gesture. Overlay routers (settings, tools,
+                // router, …) opened via slash commands must NOT stop the
+                // manager loop — Esc there only closes the overlay and
+                // returns to the same session, whose turn keeps running.
+                && matches!(self.mode(), AppMode::Session)
                 // The /agents split owns Esc FIRST (issue 3): its Esc is
                 // PARK — leave the split with every turn (the main loop
                 // included) still running. Flagging the shared stop here
@@ -1677,10 +1683,14 @@ impl App {
                         // before.
                         self.park_agents_split();
                         return Ok(false);
-                    } else if self.state.status == crate::types::SessionStatus::Working {
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && self.state.status == crate::types::SessionStatus::Working
+                    {
                         // ONLY `Working` — same contract as the Cancel arm
                         // below: `Retry` is a terminal state (the harness
                         // thread already exited), never a winding-down loop.
+                        // Only on the Session screen: overlay routers must
+                        // never stop the manager loop on Esc.
                         self.stop_signal.store(true, Ordering::Relaxed);
                     }
                 }
@@ -1735,7 +1745,9 @@ impl App {
                         }
                         self.park_agents_split();
                         return Ok(false);
-                    } else if self.state.status == crate::types::SessionStatus::Working {
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && self.state.status == crate::types::SessionStatus::Working
+                    {
                         // ONLY `Working`: a live loop owns Esc here.
                         // `SessionStatus::Retry` is deliberately excluded —
                         // it is TERMINAL (the `HarnessEvent::Error` handler
