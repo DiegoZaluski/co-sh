@@ -1400,7 +1400,9 @@ impl PromptView {
         let has_conversation = state
             .current_session()
             .is_some_and(|s| !s.messages.is_empty());
-        let footer_text = if has_conversation {
+        let footer_text = if pane.is_some() {
+            "esc park  ctrl+x stop pane"
+        } else if has_conversation {
             "esc interrupt"
         } else {
             "tab change mode"

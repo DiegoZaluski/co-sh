@@ -521,7 +521,7 @@ impl SessionView {
                                     &r.text[..r.text.floor_char_boundary(32)],
                                     config.thinking_mode,
                                 );
-                                let header = if expanded { "- Thought" } else { "+ Thought" };
+                                let header = if expanded { "✧ Thought" } else { "✦ Thought" };
                                 if p_top >= vp_top {
                                     text_regions.push(TextRegion::one_row(
                                         content_offset,

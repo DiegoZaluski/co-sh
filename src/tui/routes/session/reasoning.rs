@@ -12,9 +12,9 @@ impl SessionView {
         expanded: bool,
         theme: &Theme,
     ) {
-        let header = if expanded { "- " } else { "+ " };
+        let header = if expanded { "✧ " } else { "✦ " };
         let title = format!("{header}Thought");
-        let header_style = Style::default().fg(rgba_color(theme.warning));
+        let header_style = Style::default().fg(rgba_color(theme.accent));
         draw_text_line(buf, &title, x, y, max_w, header_style);
         *line_h = 1;
 
