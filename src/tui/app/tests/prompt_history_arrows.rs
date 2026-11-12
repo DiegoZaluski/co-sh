@@ -47,6 +47,44 @@ fn session_with_texts(app: &mut App, id: &str, texts: &[&str]) {
     }
 }
 
+/// A pane dispatch is recorded through `record_user_input` (the shared path
+/// for the direct send, the focused-pane dispatch and the enqueue), and it
+/// must be DURABLE: a pane prompt belongs to another agent's conversation and
+/// never enters this transcript, so an in-memory-only list lost it the moment
+/// the process exited.
+#[tokio::test]
+async fn pane_inputs_persist_across_a_restart() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+
+    let mut app = App::new("/tmp".to_string());
+    session_with_texts(&mut app, "s", &["main prompt"]);
+    app.prompt_view.focus();
+
+    app.record_user_input("pane prompt");
+
+    // In memory: the walk sees the transcript's prompt and then the pane's,
+    // in send order.
+    assert_eq!(app.input_history(), vec!["main prompt", "pane prompt"]);
+
+    // Durable: the reload path a restart takes (replay of the session file)
+    // brings the same list back, with the transcript untouched.
+    let reloaded = app
+        .session_store
+        .load_session("s")
+        .expect("the history must be on disk");
+    assert_eq!(
+        reloaded.input_history,
+        vec!["main prompt", "pane prompt"],
+        "pane inputs must survive the process, not just the session switch"
+    );
+    assert_eq!(
+        reloaded.messages.len(),
+        1,
+        "pane inputs never enter the main session's transcript"
+    );
+}
+
 #[tokio::test]
 async fn up_moves_cursor_inside_recalled_draft() {
     let _guard = HOME_LOCK.lock();

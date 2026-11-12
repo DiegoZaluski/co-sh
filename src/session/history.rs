@@ -187,6 +187,16 @@ pub(crate) enum MetadataDelta {
         #[serde(default)]
         main_worktree: Option<crate::git::worktree::PaneWorktree>,
     },
+    /// The durable input history (see `Session::input_history`) REPLACED
+    /// wholesale: a fork inheriting the parent's list, or a reconciliation
+    /// after a load. UI-only bookkeeping — never model-facing data.
+    InputHistory { entries: Vec<String> },
+    /// The durable input history EXTENDED with the user's newest inputs, in
+    /// send order — the normal case, so the history file grows by one short
+    /// delta per prompt instead of a full copy of the list. Replayed by
+    /// appending; older payloads never carry it (no history existed).
+    /// UI-only bookkeeping — never model-facing data.
+    InputHistoryAppend { entries: Vec<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -346,6 +356,7 @@ impl BranchProjection {
                 agents_panes: None,
                 agents_mode_open: false,
                 agents_hidden: Vec::new(),
+                input_history: Vec::new(),
                 ctx_ids: HashMap::new(),
                 main_agent_worktree: None,
             },
@@ -963,6 +974,12 @@ fn apply_metadata(state: &mut BranchProjection, change: &MetadataDelta) {
             state.session.agents_hidden = hidden.clone();
             state.session.main_agent_worktree = main_worktree.clone();
         }
+        MetadataDelta::InputHistory { entries } => {
+            state.session.input_history = entries.clone();
+        }
+        MetadataDelta::InputHistoryAppend { entries } => {
+            state.session.input_history.extend(entries.iter().cloned());
+        }
     }
 }
 
@@ -1239,6 +1256,7 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             agents_panes: None,
             agents_mode_open: false,
             agents_hidden: Vec::new(),
+            input_history: Vec::new(),
             ctx_ids: HashMap::new(),
             main_agent_worktree: None,
         };

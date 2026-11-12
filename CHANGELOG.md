@@ -27,9 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input history (Ctrl+↑/↓) is now shared linearly between the main agent
   and `/agents` panes: messages sent to a pane appear in the main
   session's recoverable input history, without affecting the main agent's
-  flow or transcript.
+  flow or transcript. The list belongs to the session, so it survives a
+  restart and a session switch.
 
 ### Fixed
+
+- Inputs sent to `/agents` panes no longer vanish when cosh exits. They
+  never enter the session transcript (the conversation belongs to another
+  agent), so they are now recorded on the session and persisted as an
+  append-only metadata delta the moment they are sent — Ctrl+↑ finds them
+  in the next process instead of only in the one that typed them.
 
 - Revert and Fork on the `/agents` cosh pane no longer fail with "Could
   not record the revert" / "Could not create the branch". The pane's

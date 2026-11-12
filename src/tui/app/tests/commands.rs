@@ -2496,6 +2496,7 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: std::collections::HashMap::new(),
         main_agent_worktree: None,
     });

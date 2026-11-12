@@ -647,6 +647,7 @@ async fn pane_model_persists_in_the_session_markers() {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: std::collections::HashMap::new(),
         main_agent_worktree: None,
     });
@@ -789,6 +790,7 @@ async fn hydrated_manager_pane_shows_the_session_model_on_the_badge() {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: std::collections::HashMap::new(),
         main_agent_worktree: None,
     });

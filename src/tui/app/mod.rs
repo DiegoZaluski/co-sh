@@ -236,13 +236,6 @@ pub struct App {
     pub transparent_background: bool,
     pub session_view: SessionView,
     pub prompt_view: PromptView,
-    /// In-memory history of user inputs for this session (principal + pane
-    /// dispatches), in send order. Seeded from the session's user messages
-    /// when the session changes. Used by Ctrl+↑/↓ history navigation; pane
-    /// inputs live here (not in the session transcript) so they never affect
-    /// the main agent's flow.
-    pub(crate) input_history: Vec<String>,
-    pub(crate) input_history_session: Option<String>,
     pub sidebar: SessionsView,
     /// Ctrl+F file explorer shown in the left panel while `left_panel` is
     /// [`Mode::Explorer`]. Built lazily on first open so a user who
@@ -909,8 +902,6 @@ impl App {
             #[cfg(feature = "embed")]
             show_rag: false,
             prompt_view: PromptView::new(),
-            input_history: Vec::new(),
-            input_history_session: None,
             sidebar: SessionsView::new(),
             file_explorer: None,
             explorer_statuses: StatusIndex::default(),

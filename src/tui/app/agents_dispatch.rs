@@ -1093,28 +1093,66 @@ impl App {
         self.slash_menu.update(&self.prompt_view.input);
     }
 
-    /// Seed/refresh the in-memory input history for the current session.
-    /// Rebuilds from the session's user messages when the session changes.
-    pub(crate) fn ensure_input_history(&mut self) {
-        let sid = self.state.current_session_id.clone();
-        if self.input_history_session != sid {
-            self.input_history = self
-                .state
-                .current_session()
-                .map(crate::component::prompt::PromptView::user_message_texts)
-                .unwrap_or_default();
-            self.input_history_session = sid;
+    /// The current session's durable input history (main-agent prompts,
+    /// queued messages and `/agents` pane dispatches), oldest first.
+    ///
+    /// A session recorded before the history was persisted carries only its
+    /// transcript, so an empty list is seeded from the user messages once —
+    /// in memory only; the next recorded input persists the seed together
+    /// with itself. Reading the SESSION (not an App-level buffer) is what
+    /// makes the list survive a restart and a session switch.
+    pub(crate) fn input_history(&mut self) -> Vec<String> {
+        let seed = match self.state.current_session() {
+            Some(session) if !session.input_history.is_empty() => {
+                return session.input_history.clone();
+            }
+            Some(session) => crate::component::prompt::PromptView::user_message_texts(session),
+            None => return Vec::new(),
+        };
+        if seed.is_empty() {
+            return seed;
         }
+        if let Some(session) = self.state.current_session_mut() {
+            session.input_history = seed.clone();
+        }
+        seed
     }
 
-    /// Record a user input (principal or pane dispatch) into the in-memory
-    /// history, in send order. Does not touch the session transcript, so the
-    /// main agent's flow is unaffected.
+    /// Record a user input (main prompt, queued message or pane dispatch)
+    /// into the current session's input history, in send order, and persist
+    /// it immediately.
+    ///
+    /// A pane input belongs to another agent's conversation and never
+    /// enters this session's transcript, so this list is the only record of
+    /// it: waiting for the next regular save would lose it whenever the
+    /// process exits first. The write is synchronous (one short metadata
+    /// delta) for the same reason.
     pub(crate) fn record_user_input(&mut self, text: &str) {
-        self.ensure_input_history();
-        if !text.trim().is_empty() {
-            self.input_history.push(text.to_string());
+        if text.trim().is_empty() {
+            return;
         }
+        // A legacy session (no history yet) records this input on top of the
+        // transcript's messages, so the walk keeps the earlier prompts.
+        let seed = match self.state.current_session() {
+            Some(session) if session.input_history.is_empty() => {
+                Some(crate::component::prompt::PromptView::user_message_texts(
+                    session,
+                ))
+            }
+            Some(_) => None,
+            // No session yet (the very first prompt of a fresh app):
+            // `start_agent_loop` creates the session and puts this message on
+            // the transcript, where the next seed picks it up.
+            None => return,
+        };
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        if let Some(seed) = seed {
+            session.input_history = seed;
+        }
+        session.input_history.push(text.to_string());
+        self.session_store.save_session(session);
     }
 
     /// Force-close ONE pane's turn (the Ctrl+X interrupt): the pane goes
@@ -2526,6 +2564,7 @@ impl App {
             agents_panes: None,
             agents_mode_open: false,
             agents_hidden: Vec::new(),
+            input_history: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
             main_agent_worktree: None,
         });
@@ -3730,6 +3769,7 @@ pub(in crate::app) fn persist_manager_session(
             agents_panes: None,
             agents_mode_open: false,
             agents_hidden: Vec::new(),
+            input_history: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
             main_agent_worktree: None,
         });

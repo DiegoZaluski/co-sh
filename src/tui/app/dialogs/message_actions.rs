@@ -132,7 +132,11 @@ impl App {
                 let session = self.state.current_session_mut().expect("session");
                 session.messages.truncate(idx);
                 // Keep the in-memory display projection aligned with the
-                // reference selected by the appended Revert delta.
+                // reference selected by the appended Revert delta. The input
+                // history is deliberately NOT truncated: it is a recall log of
+                // what the user typed, and the reverted prompt goes back into
+                // the draft — dropping it would erase the very text being
+                // edited.
                 let remaining: std::collections::HashSet<&str> =
                     session.messages.iter().map(|m| m.id.as_str()).collect();
                 session
@@ -457,6 +461,10 @@ impl App {
                     agents_panes: None,
                     agents_mode_open: false,
                     agents_hidden: Vec::new(),
+                    // A pane fork is another agent's conversation: it starts
+                    // with its own (empty) input history, seeded from the
+                    // forked transcript on first use.
+                    input_history: Vec::new(),
                     ctx_ids: std::collections::HashMap::new(),
                     main_agent_worktree: None,
                 };

@@ -1904,14 +1904,12 @@ impl App {
                 }
                 Some(crate::keymap::Action::HistoryUp) => {
                     self.prompt_view.note_activity();
-                    self.ensure_input_history();
-                    let user_msgs = self.input_history.clone();
+                    let user_msgs = self.input_history();
                     self.prompt_view.history_up(&user_msgs);
                 }
                 Some(crate::keymap::Action::HistoryDown) => {
                     self.prompt_view.note_activity();
-                    self.ensure_input_history();
-                    let user_msgs = self.input_history.clone();
+                    let user_msgs = self.input_history();
                     self.prompt_view.history_down(&user_msgs);
                 }
                 None => {
@@ -1938,8 +1936,7 @@ impl App {
                                     if self.prompt_view.input.is_empty()
                                         || self.prompt_view.cursor_at_head(text_w)
                                     {
-                                        self.ensure_input_history();
-                                        let user_msgs = self.input_history.clone();
+                                        let user_msgs = self.input_history();
                                         self.prompt_view.history_up(&user_msgs);
                                     } else {
                                         self.prompt_view.note_activity();
@@ -1970,8 +1967,7 @@ impl App {
                                     if self.prompt_view.input.is_empty()
                                         || self.prompt_view.cursor_at_tail(text_w)
                                     {
-                                        self.ensure_input_history();
-                                        let user_msgs = self.input_history.clone();
+                                        let user_msgs = self.input_history();
                                         self.prompt_view.history_down(&user_msgs);
                                     } else {
                                         self.prompt_view.note_activity();

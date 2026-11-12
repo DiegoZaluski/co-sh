@@ -361,6 +361,7 @@ mod tests {
             }]),
             agents_mode_open: false,
             agents_hidden: Vec::new(),
+            input_history: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
             main_agent_worktree: None,
         };
@@ -379,6 +380,7 @@ mod tests {
                 agents_panes: None,
                 agents_mode_open: false,
                 agents_hidden: Vec::new(),
+                input_history: Vec::new(),
                 ctx_ids: std::collections::HashMap::new(),
                 main_agent_worktree: None,
             }

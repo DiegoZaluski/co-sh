@@ -165,6 +165,18 @@ pub struct Session {
     /// deltas alongside `agents_panes`.
     #[serde(default)]
     pub agents_hidden: Vec<HiddenPane>,
+    /// Durable user-input history for this session: every prompt the user
+    /// actually sent — to the main agent, to a queued message and to an
+    /// `/agents` pane — in send order, oldest first. Ctrl+↑/↓ walks it.
+    ///
+    /// A pane dispatch belongs to ANOTHER agent's conversation and never
+    /// enters this transcript, so without this list it lived only in the
+    /// running process and disappeared on restart (or on the first session
+    /// switch). Persisted by metadata deltas — the append case carries just
+    /// the newest entries, so a file grows by one short delta per prompt.
+    /// UI-only bookkeeping — never model-facing data.
+    #[serde(default)]
+    pub input_history: Vec<String>,
     /// Legacy display bookkeeping: message id → context-manager item ids.
     /// New history boundaries are recorded as explicit context deltas, so a
     /// display-only save cannot erase the semantic view identity. This field
@@ -528,6 +540,7 @@ mod tests {
             agents_panes: None,
             agents_mode_open: false,
             agents_hidden: Vec::new(),
+            input_history: Vec::new(),
             ctx_ids: Default::default(),
             main_agent_worktree: None,
             messages: vec![

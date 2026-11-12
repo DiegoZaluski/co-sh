@@ -19,6 +19,7 @@ fn app_with_user_message() -> App {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: Default::default(),
         main_agent_worktree: None,
         messages: vec![
@@ -278,6 +279,7 @@ async fn message_actions_single_user_message_shows_all_options() {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: Default::default(),
         main_agent_worktree: None,
         messages: vec![Message {
@@ -544,6 +546,7 @@ fn app_with_cosh_pane() -> App {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: Default::default(),
         main_agent_worktree: None,
         messages: vec![
@@ -1015,6 +1018,7 @@ fn app_with_manager_context_session() -> App {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: Default::default(),
         main_agent_worktree: None,
         messages,
@@ -1163,6 +1167,7 @@ async fn pane_action_targets_the_clicked_prompt_across_agent_call_prompts() {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: Default::default(),
         main_agent_worktree: None,
         messages: vec![
@@ -1365,6 +1370,7 @@ async fn pane_action_refuses_an_unmatched_prompt_instead_of_guessing() {
         agents_panes: None,
         agents_mode_open: false,
         agents_hidden: Vec::new(),
+        input_history: Vec::new(),
         ctx_ids: Default::default(),
         main_agent_worktree: None,
         messages: vec![

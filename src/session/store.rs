@@ -485,6 +485,28 @@ impl SessionStore {
                 },
             });
         }
+        // The durable input history. It only ever GROWS during normal use,
+        // so the delta carries just the new suffix and one prompt costs one
+        // short line; a wholesale difference (a fork starting from the
+        // parent's list, or a divergence after a load) replaces it instead.
+        // Without this, `/agents` pane prompts — which never enter the
+        // transcript — were the only inputs that died with the process.
+        if current.session.input_history != requested.input_history {
+            let known = &current.session.input_history;
+            let grew = requested.input_history.len() > known.len()
+                && requested.input_history.starts_with(known);
+            deltas.push(Delta::Metadata {
+                change: if grew {
+                    MetadataDelta::InputHistoryAppend {
+                        entries: requested.input_history[known.len()..].to_vec(),
+                    }
+                } else {
+                    MetadataDelta::InputHistory {
+                        entries: requested.input_history.clone(),
+                    }
+                },
+            });
+        }
 
         let previous_messages: HashMap<&str, &crate::types::Message> = current
             .session
@@ -1895,6 +1917,7 @@ mod tests {
             agents_panes: None,
             agents_mode_open: false,
             agents_hidden: Vec::new(),
+            input_history: Vec::new(),
             ctx_ids: HashMap::new(),
             main_agent_worktree: None,
         }
@@ -4022,6 +4045,54 @@ mod tests {
         ]);
         store.save_session(&restored);
         assert!(store.linked_agents_pane_sessions().contains("7200-pane"));
+    }
+
+    /// The durable input history round-trips through the metadata delta
+    /// pipeline — that is what makes `/agents` pane prompts (which never
+    /// enter the transcript) survive the process that recorded them. The
+    /// normal append costs one short delta carrying ONLY the new entries,
+    /// so a long session's file does not re-copy the whole list per prompt.
+    #[test]
+    fn input_history_round_trips_and_appends_incrementally() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let mut session =
+            make_test_session("7300", "History", vec![make_user_msg("msg-0", "hello")]);
+        session.input_history = vec!["hello".into()];
+        store.save_session(&session);
+        assert_eq!(
+            store.load_session("7300").expect("reload").input_history,
+            vec!["hello"],
+            "the history must be durable, not just in memory"
+        );
+
+        let path = store.file_path("7300");
+        let before = std::fs::read(&path).unwrap().len();
+        session.input_history.push("pane prompt".into());
+        store.save_session(&session);
+        let after = std::fs::read(&path).unwrap().len();
+        let loaded = store.load_session("7300").expect("reload");
+        assert_eq!(loaded.input_history, vec!["hello", "pane prompt"]);
+        assert_eq!(
+            loaded.messages.len(),
+            1,
+            "a pane prompt never enters the transcript"
+        );
+        assert!(
+            after - before < 512,
+            "the append must carry only the new entry (grew by {})",
+            after - before
+        );
+
+        // A wholesale difference (a fork inheriting a parent's list, or a
+        // rewrite) replaces the projection instead of appending to it.
+        session.input_history = vec!["only this".into()];
+        store.save_session(&session);
+        assert_eq!(
+            store.load_session("7300").expect("reload").input_history,
+            vec!["only this"]
+        );
     }
 
     #[test]
