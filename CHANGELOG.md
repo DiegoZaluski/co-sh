@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native, store-backed list is unchanged and still answers for the cosh
   pane, whose conversation is a real session.
 
+- Input history (Ctrl+↑/↓) is now shared linearly between the main agent
+  and `/agents` panes: messages sent to a pane appear in the main
+  session's recoverable input history, without affecting the main agent's
+  flow or transcript.
+
 ### Fixed
 
 - Revert and Fork on the `/agents` cosh pane no longer fail with "Could
@@ -50,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cosh pane whose stored session cannot be read is refused ("Could not
   load this pane's session.") instead of being treated as an ACP pane,
   which silently dropped the binding and rewrote the pane as unbound.
+
+- The manager loop is no longer stopped when Esc is pressed in overlay
+  routers; gating the stop-signal branches to `AppMode::Session` keeps
+  the loop running while overlay routers are active.
 
 ## [0.2.2]
 
