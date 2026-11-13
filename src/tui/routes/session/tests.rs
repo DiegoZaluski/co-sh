@@ -8194,22 +8194,22 @@ fn probe_queue_after_block_sweep() {
         // lines "S<i>".
         let mut parts = parts.clone();
         for p in parts.iter_mut() {
-            if let Part::Tool(t) = p {
-                if let Some(out) = &t.output {
-                    t.output = Some(
-                        out.lines()
-                            .enumerate()
-                            .map(|(i, l)| {
-                                if l.starts_with("line ") {
-                                    format!("B{i} {l}")
-                                } else {
-                                    l.to_string()
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
+            if let Part::Tool(t) = p
+                && let Some(out) = &t.output
+            {
+                t.output = Some(
+                    out.lines()
+                        .enumerate()
+                        .map(|(i, l)| {
+                            if l.starts_with("line ") {
+                                format!("B{i} {l}")
+                            } else {
+                                l.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
         }
         let stream = Message {
@@ -8295,7 +8295,7 @@ fn probe_queue_after_block_sweep() {
                 eprintln!("   hover painted_row={qy} -> idx {hovered:?}");
                 if hovered == Some(2) {
                     let c_top = i32::from(area.y) + view.prefix_y[2] - view.scroll_y;
-                    let c_bot = c_top + view.msg_height_cache[2] as i32;
+                    let c_bot = c_top + view.msg_height_cache[2];
                     eprintln!("   tint rows (cached) = [{c_top},{c_bot}) vs painted row {qy}");
                 }
             }
@@ -8767,11 +8767,11 @@ fn probe_estimate_vs_paint_row_counts() {
         let mut last = 0usize;
         for y in 0..400usize {
             for x in 0..area_w {
-                if let Some(c) = buf.cell((x, y as u16)) {
-                    if c.symbol().chars().next().unwrap_or(' ') != ' ' {
-                        last = y + 1;
-                        break;
-                    }
+                if let Some(c) = buf.cell((x, y as u16))
+                    && c.symbol().chars().next().unwrap_or(' ') != ' '
+                {
+                    last = y + 1;
+                    break;
                 }
             }
         }
@@ -9877,11 +9877,11 @@ fn tool_completion_inside_the_streaming_message_is_remeasured() {
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
 
     // The tool completes in place while the message keeps streaming.
-    if let Some(session) = state.current_session_mut() {
-        if let Some(Part::Tool(t)) = session.messages[0].parts.first_mut() {
-            t.status = ToolStatus::Completed;
-            t.output = Some((0..15).map(|i| format!("output line {i}\n")).collect());
-        }
+    if let Some(session) = state.current_session_mut()
+        && let Some(Part::Tool(t)) = session.messages[0].parts.first_mut()
+    {
+        t.status = ToolStatus::Completed;
+        t.output = Some((0..15).map(|i| format!("output line {i}\n")).collect());
     }
     let mut buf = Buffer::empty(area);
     view.render(&mut buf, area, &state, &theme, &config, 0.016);

@@ -47,8 +47,10 @@ pub struct ProgressCallbacks {
     inner: std::sync::Arc<std::sync::Mutex<Callbacks>>,
 }
 
+type InitCallback = Box<dyn FnMut(usize, &str) + Send>;
+
 struct Callbacks {
-    init: Box<dyn FnMut(usize, &str) + Send>,
+    init: InitCallback,
     update: Box<dyn FnMut(usize) + Send>,
     finish: Box<dyn FnMut() + Send>,
 }

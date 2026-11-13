@@ -1113,7 +1113,7 @@ fn pipeline_stringified_scalar_that_is_not_a_number_reaches_the_hint() {
         result
             .items
             .iter()
-            .all(|i| matches!(i, Item::ToolCall(_)) == false),
+            .all(|i| !matches!(i, Item::ToolCall(_))),
         "a non-numeric string for an integer field must be rejected: {result:?}"
     );
     assert_eq!(ex.take_tool_failures(), 1, "rejection, not silent pass");

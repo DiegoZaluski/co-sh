@@ -2782,7 +2782,7 @@ mod tests {
         let second = enqueue("claude", "two", MAIN, ReplyMode::Wait).unwrap();
         assert!(pop_next_request("claude").is_some(), "first dispatched");
         assert!(has_queued_request("claude"), "the second stays queued");
-        cancel_serving("claude", "interrupted by the user (Ctrl+X)".into());
+        let _ = cancel_serving("claude", "interrupted by the user (Ctrl+X)".into());
         assert!(
             !has_queued_request("claude"),
             "the user's stop drops the queued follow-up: no auto-redispatch"

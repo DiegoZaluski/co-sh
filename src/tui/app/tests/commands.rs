@@ -1624,6 +1624,7 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
     // failure instead of hanging forever) and the registry is EMPTY —
     // `has_coworkers` false means the next harness build registers no
     // `agents_call` tool at all.
+    drop(_guard);
     let answer = rx.await.expect("sender alive");
     assert!(
         answer.output.is_err(),
