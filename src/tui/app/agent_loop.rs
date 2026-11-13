@@ -22,16 +22,15 @@ pub(super) const QUEUE_ACTIONS_GRACE: Duration = Duration::from_secs(5);
 /// any future call-id-uniqueness assumption (masking, chain-hiding).
 static COMMAND_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// One tokio runtime for the whole process, shared by the agent loop and the
-/// Command-mode executor: the LSP singleton's ingestion/auto-discovery tasks
-/// and the language servers' transport tasks must outlive individual turns —
+/// One tokio runtime for the whole process, shared by the agent loop, the
+/// Command-mode executor and background device sign-ins (gateway
+/// recommendation): the LSP singleton's ingestion/auto-discovery tasks and
+/// the language servers' transport tasks must outlive individual turns —
 /// a per-turn runtime would kill them (and, via `kill_on_drop`, the server
-/// processes) the moment a turn ends.
-/// Shared tokio runtime for agent-loop work AND background device sign-ins
-/// (gateway recommendation): both must outlive individual UI turns, and the
-/// UI thread has no ambient runtime context to spawn into.
-pub(super) static AGENT_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
-    std::sync::OnceLock::new();
+/// processes) the moment a turn ends. It lives in the library's harness
+/// assembly (`cosh::assembly`) and is re-exported here for the TUI's own
+/// spawners.
+pub(super) use cosh::assembly::AGENT_RUNTIME;
 
 impl App {
     /// True while the loop must not consume the next queued message: either
@@ -461,13 +460,13 @@ impl App {
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
 
-            let rt = super::harness_assembly::agent_runtime();
+            let rt = cosh::assembly::agent_runtime();
 
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 rt.block_on(async {
-                    use super::harness_assembly::{HarnessAssembly, assemble, run_assembled_loop};
+                    use cosh::assembly::{HarnessAssembly, assemble, run_assembled_loop};
 
-                    // ONE assembly (harness_assembly.rs): the connector,
+                    // ONE assembly (cosh::assembly): the connector,
                     // cache headers, MCP, RAG, effective-context budget and
                     // skills are decided here and built by the shared
                     // assembler — the main loop adds only its own session

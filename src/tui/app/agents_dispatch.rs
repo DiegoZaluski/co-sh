@@ -1745,7 +1745,7 @@ impl App {
                 // nobody pumps a pane queue), NO decision audit (not
                 // distributed) and the pane's OWN session id as the
                 // cache-affinity key.
-                let assembly = super::harness_assembly::HarnessAssembly {
+                let assembly = cosh::assembly::HarnessAssembly {
                     provider: manager_route
                         .as_ref()
                         .map(|(p, _)| p.clone())
@@ -3138,7 +3138,7 @@ fn close_pane_turn(
 }
 
 /// One manager-pane turn: the pane's harness assembled through the ONE
-/// assembly (`harness_assembly::assemble`), whose plain event stream is bridged
+/// assembly (`cosh::assembly::assemble`), whose plain event stream is bridged
 /// into the SAME typed `SubagentEvent` stream the external ACP panes emit —
 /// both pane flavors render identically. The final report (the loop's
 /// closure) arrives as `AgentsPaneDone`.
@@ -3152,7 +3152,7 @@ fn run_manager_turn(
         tokio::sync::mpsc::UnboundedReceiver<cosh_tools::subagent::events::PanePermissionAnswer>,
     >,
     stop_signal: Arc<AtomicBool>,
-    assembly: super::harness_assembly::HarnessAssembly,
+    assembly: cosh::assembly::HarnessAssembly,
     session_id: String,
     store: crate::session::store::SessionStore,
     event_tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
@@ -3165,12 +3165,12 @@ fn run_manager_turn(
     let panic_session = session_id.clone();
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // THE shared process runtime (`harness_assembly::agent_runtime`), not
+        // THE shared process runtime (`cosh::assembly::agent_runtime`), not
         // a per-turn current_thread one: the pane now assembles MCP (and
         // may touch the LSP singleton) through the SAME assembly as the main
         // loop, and transports spawned on a per-turn runtime would be
         // killed (kill_on_drop) the moment the turn ends.
-        let rt = super::harness_assembly::agent_runtime();
+        let rt = cosh::assembly::agent_runtime();
         rt.block_on(async move {
             let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
             // The manager loop's permission channel: with a TUI-connected
@@ -3181,7 +3181,7 @@ fn run_manager_turn(
             let (loop_tx, mut loop_rx) =
                 tokio::sync::mpsc::unbounded_channel::<cosh::harness::HarnessEvent>();
 
-            // THE assembly (`harness_assembly::assemble`): the pane assembles
+            // THE assembly (`cosh::assembly::assemble`): the pane assembles
             // through the SAME path the main loop does — connector with the
             // user's tool-call mode + reasoning resolution, prompt-cache
             // headers keyed to the PANE's own session, MCP boot, RAG,
@@ -3190,7 +3190,7 @@ fn run_manager_turn(
             // pane id, no queued input, no audit). An assembly failure
             // closes the pane's turn with it instead of an Error event (the
             // pane has its own Done contract, not the main chat's).
-            let mut manager = match super::harness_assembly::assemble(assembly, &event_tx).await {
+            let mut manager = match cosh::assembly::assemble(assembly, &event_tx).await {
                 Ok(manager) => manager,
                 Err(error) => {
                     // Gate-free fact capture (see the external turn's record):
@@ -3388,7 +3388,7 @@ fn run_manager_turn(
                 }
             });
 
-            super::harness_assembly::run_assembled_loop(
+            cosh::assembly::run_assembled_loop(
                 &mut manager,
                 &input,
                 loop_tx,
