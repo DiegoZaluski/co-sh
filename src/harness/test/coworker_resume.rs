@@ -250,7 +250,7 @@ async fn tool_loop_detection_recovers_a_pane_once_before_stopping() {
     let mut streams: Vec<Result<Vec<&str>, &str>> = (0..20).map(|_| Ok(vec![call])).collect();
     // After the recovery steering lands, the model changes behavior.
     streams[10] = Ok(vec!["the report"]);
-    let mut h = pane()
+    let h = pane()
         .with_test_tool(
             "test_tool",
             serde_json::json!({
@@ -290,7 +290,7 @@ async fn tool_loop_detection_recovers_once_then_stops_on_the_second_firing() {
     // iteration 11 repeats the call again → second firing → Stopped.
     let call = r#"{"name": "test_tool", "arguments": {"x": "same"}}"#;
     let streams: Vec<Result<Vec<&str>, &str>> = (0..11).map(|_| Ok(vec![call])).collect();
-    let mut h = pane()
+    let h = pane()
         .with_test_tool(
             "test_tool",
             serde_json::json!({
@@ -332,7 +332,7 @@ async fn tool_loop_detection_stops_a_chat_turn_without_recovery() {
     let streams: Vec<Result<Vec<&str>, &str>> = (0..12)
         .map(|_| Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "same"}}"#]))
         .collect();
-    let mut h = Harness::new_test()
+    let h = Harness::new_test()
         .with_test_tool(
             "test_tool",
             serde_json::json!({

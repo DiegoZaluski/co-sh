@@ -299,6 +299,7 @@ impl ExtractAction {
     /// - `pending_tool_call`: a call WAS validated but parked for delivery
     ///   and the stream ended before the next poll could return it — it
     ///   would be silently dropped.
+    ///
     /// Trailing text after a completed call (`deferred_tail`) is deliberately
     /// excluded: it also occurs on healthy ends, so it cannot distinguish a
     /// cut from a clean finish.

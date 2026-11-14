@@ -403,7 +403,7 @@ pub(crate) fn py_is_lower(ch: char) -> bool {
 
 /// `unicodedata.combining(ch) != 0` (the canonical combining class).
 pub(crate) fn py_is_combining(ch: char) -> bool {
-    combining_class().get(ch).to_icu4c_value() != 0
+    combining_class().get(ch).0 != 0
 }
 
 /// `_script_of` upstream is `def _script_of(ch)`; the port takes the

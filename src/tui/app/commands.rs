@@ -1227,18 +1227,18 @@ impl App {
                 // not only on its next turn.
                 self.hydrate_manager_pane_model_selections();
             }
-            Some((Some(panes), false, _)) => {
+            Some((Some(panes), false, _))
+                if !panes.is_empty() =>
+            {
                 // An EMPTY persisted set is the legacy emptied-split shape
                 // (pre-auto-close): it is NOT a parkable set — a rebuilt
                 // parked split would hold no panes and a later re-attach
                 // would put an empty split screen up. Skip the park: the
                 // session comes back to the NORMAL chat, a later `/agents`
                 // opens the picker (the initial state).
-                if !panes.is_empty() {
-                    self.parked_agents_split = Some(
-                        crate::routes::session::agents_split::AgentsSplitState::new(panes),
-                    );
-                }
+                self.parked_agents_split = Some(
+                    crate::routes::session::agents_split::AgentsSplitState::new(panes),
+                );
             }
             _ => {}
         }

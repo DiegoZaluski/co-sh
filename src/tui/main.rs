@@ -22,9 +22,6 @@ mod util;
 // aliased at the bin root so `crate::x` paths in the app keep resolving.
 use cosh::{config, fallback, notification, session, types, update, usage};
 
-#[cfg(feature = "onnx")]
-use cosh::weights;
-
 #[cfg(test)]
 #[path = "test/rag_abort.rs"]
 mod test;

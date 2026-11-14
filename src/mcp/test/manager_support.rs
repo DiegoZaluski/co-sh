@@ -16,7 +16,7 @@ use rmcp::model::{
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
     Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse,
     ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role, ServerCapabilities,
-    ServerInfo, Tool,
+    ServerConfig, Tool,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
 use rmcp::{ErrorData as McpErrorData, ServiceExt};
@@ -47,8 +47,8 @@ pub(crate) fn ok_server(tool: &str, delay_ms: u64, fail: bool) -> (OkServer, Arc
 }
 
 impl ServerHandler for OkServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     fn discover(
@@ -201,8 +201,8 @@ pub(crate) struct CatalogServer {
 }
 
 impl ServerHandler for CatalogServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -328,8 +328,8 @@ pub(crate) struct LegacyOnlyServer {
 }
 
 impl ServerHandler for LegacyOnlyServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     fn discover(
@@ -370,8 +370,8 @@ pub(crate) struct ModernOnlyServer {
 }
 
 impl ServerHandler for ModernOnlyServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     fn supported_protocol_versions(
@@ -421,8 +421,8 @@ pub(crate) struct SilentServer {
 }
 
 impl ServerHandler for SilentServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     async fn discover(
@@ -458,8 +458,8 @@ pub(crate) struct OldVersionServer {
 }
 
 impl ServerHandler for OldVersionServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     fn discover(

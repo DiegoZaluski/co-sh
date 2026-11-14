@@ -2365,7 +2365,7 @@ where
                 // the request is in flight and must not reach the timeline
                 // or the closure.
                 load_window.store(true, Ordering::Relaxed);
-                let opened = match handshake_step(
+                match handshake_step(
                     "session open",
                     open_or_resume_session(
                         &connection,
@@ -2396,8 +2396,7 @@ where
                         .await?
                     }
                     Err(auth_error) => return Err(auth_error),
-                };
-                opened
+                }
             };
             // CLOSE the replay window: the load response has landed, so
             // everything streaming from here is THIS turn's live work.

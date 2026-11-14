@@ -1,18 +1,18 @@
 //! THE harness assembly.
 //!
-//! One place builds every loop-bearing [`Harness`] in the TUI: the main
-//! agent loop and the `/agents` cosh pane both assemble through
-//! [`assemble`] — the same connector resolution, the same prompt-cache
-//! headers, the same MCP boot, the same RAG wiring, the same
-//! effective-context budget and the same skills — with the caller's
-//! differences declared as explicit parameters (mode, instructions,
-//! disabled tools, cache key, checkup, queued input), never as a
-//! re-implemented subset. The assembly used to live twice (here for the
-//! main loop, a hand-cut subset in `agents_dispatch::run_manager_turn`);
-//! the subset had already drifted (`effective_context`, MCP, cache
-//! headers, tool-call mode never reached the pane).
+//! One place builds every loop-bearing [`Harness`]: the main agent loop and
+//! the `/agents` cosh pane both assemble through [`assemble`] — the same
+//! connector resolution, the same prompt-cache headers, the same MCP boot,
+//! the same RAG wiring, the same effective-context budget and the same
+//! skills — with the caller's differences declared as explicit parameters
+//! (mode, instructions, disabled tools, cache key, checkup, queued input),
+//! never as a re-implemented subset. The assembly used to live twice in the
+//! TUI (once for the main loop, a hand-cut subset in
+//! `agents_dispatch::run_manager_turn`); the subset had already drifted
+//! (`effective_context`, MCP, cache headers, tool-call mode never reached
+//! the pane).
 //!
-//! This is the assembly ONLY — the loop execution and every App side
+//! This is the assembly ONLY — the loop execution and every caller side
 //! effect (session bookkeeping, transcript, spinner, queue resets) stay
 //! with the caller, and the caller owns how an assembly failure surfaces
 //! (the main loop toasts an `Error` event; the pane closes its turn with
@@ -29,16 +29,17 @@ use tokio::sync::mpsc;
 
 use aiface::connector::Connector;
 use aiface::connector::ToolCallMode;
-use cosh::harness::ContextManagerState;
-use cosh::harness::Harness;
-use cosh::harness::HarnessEvent;
-use cosh::harness::Mode;
-use cosh::harness::queued_input::QueuedInput;
+
+use crate::harness::ContextManagerState;
+use crate::harness::Harness;
+use crate::harness::HarnessEvent;
+use crate::harness::Mode;
+use crate::harness::queued_input::QueuedInput;
 
 /// Everything one agent-loop assembly needs, decided by the caller. The
 /// main loop fills it from the user's live config; the cosh pane fills it
 /// from the same config plus its own session identity.
-pub(crate) struct HarnessAssembly {
+pub struct HarnessAssembly {
     /// Primary provider (the session's own route, or the auto-rotation
     /// winner when `model` is `auto`).
     pub provider: String,
@@ -77,8 +78,8 @@ pub(crate) struct HarnessAssembly {
     pub cache_key: Option<String>,
     /// Registered MCP servers (Settings screen → setup.json): booted
     /// before the header snapshot with per-server failure toasts.
-    pub mcp_config: cosh::mcp::McpConfig,
-    pub skills_config: cosh::setup::SkillsConfig,
+    pub mcp_config: crate::mcp::McpConfig,
+    pub skills_config: crate::setup::SkillsConfig,
     /// The effective-context budget toggle (Settings screen) — the SAME
     /// knob for every loop; a loop assembled without it silently runs on
     /// the raw window even when the user turned the budget on.
@@ -87,11 +88,11 @@ pub(crate) struct HarnessAssembly {
     /// the audit (the main loop). `None` (the pane) assembles without the
     /// audit — a declared deviation, not an omission.
     #[cfg(feature = "onnx")]
-    pub checkup: Option<cosh::setup::DecisionConfig>,
+    pub checkup: Option<crate::setup::DecisionConfig>,
     /// RAG recall wiring (tool-doc suffix + DB registry), `Some` only when
     /// the caller has recall databases configured.
     #[cfg(feature = "embed")]
-    pub recall: Option<(String, Vec<cosh::harness::tools::RecallDb>)>,
+    pub recall: Option<(String, Vec<crate::harness::tools::RecallDb>)>,
     /// The authoritative model-facing history (the session JSONL's
     /// context records). `None` starts the loop with an empty context.
     pub ctx_state: Option<ContextManagerState>,
@@ -104,6 +105,25 @@ pub(crate) struct HarnessAssembly {
     /// mechanical anti-replication invariant (a pane never coordinates).
     /// `None` for the main loop: it owns no pane and keeps the tool.
     pub own_coworker_id: Option<String>,
+}
+
+/// Derive the opaque cache-affinity session id sent as `x-session-id` /
+/// `x-session-affinity` on every LLM request of the chat session.
+///
+/// Gateways that load-balance across backends (e.g. Charm Hyper) use these
+/// headers to pin a session's requests — and the backend prompt-cache
+/// entries they created — to one node. Without affinity, each turn's full
+/// context resend can land on a cache-cold node and bill uncached input.
+///
+/// The chat session id is hashed (XXH64, same family as Crush's XXH3
+/// `session.HashID`) so the header value is deterministic AND opaque: it
+/// never exposes raw session data, satisfying the SDK's
+/// `with_session_id` contract ("never raw user data").
+pub fn session_affinity_id(session_id: &str) -> String {
+    format!(
+        "{:016x}",
+        xxhash_rust::xxh64::xxh64(session_id.as_bytes(), 0)
+    )
 }
 
 /// Build the connector this loop's requests ride: the user's tool-call
@@ -123,7 +143,7 @@ fn build_connector(a: &HarnessAssembly) -> Result<(Connector, Vec<(String, Strin
             None => c,
         };
         let c = match &a.cache_key {
-            Some(id) => c.with_session_id(super::session_affinity_id(id)),
+            Some(id) => c.with_session_id(session_affinity_id(id)),
             None => c,
         };
         match &a.openai_cache_retention {
@@ -202,7 +222,7 @@ fn build_connector(a: &HarnessAssembly) -> Result<(Connector, Vec<(String, Strin
 /// failure here is RETURNED (the caller decides how its surface reports
 /// it); non-fatal degradation (MCP server failures, audit fail-open)
 /// toasts through `event_tx` and assembles anyway.
-pub(crate) async fn assemble(
+pub async fn assemble(
     // `mut` serves the embed-gated `recall: None` → disabled-tools insert
     // below; other feature sets never mutate it.
     #[cfg_attr(not(feature = "embed"), allow(unused_mut))] mut a: HarnessAssembly,
@@ -253,8 +273,8 @@ pub(crate) async fn assemble(
     if let Some(checkup_config) = a.checkup
         && checkup_config.termination.enabled
     {
-        use cosh::daemon::decision::{IpcCheckup, Kind};
-        use cosh::harness::events::ToastVariant;
+        use crate::daemon::decision::{IpcCheckup, Kind};
+        use crate::harness::events::ToastVariant;
 
         // The audit's kind resolves through the WEIGHTS MIRROR: the
         // installer fills the shared hf-hub cache (cache-first, lazy —
@@ -313,7 +333,7 @@ pub(crate) async fn assemble(
     // Connect MCP servers before the header snapshot: the first
     // extractor/native-tools view must see them.
     if let Err(err) = harness.connect_mcp().await {
-        use cosh::harness::events::ToastVariant;
+        use crate::harness::events::ToastVariant;
         let _ = event_tx.send(HarnessEvent::Toast {
             message: format!("MCP config invalid: {err}"),
             variant: ToastVariant::Warning,
@@ -324,13 +344,13 @@ pub(crate) async fn assemble(
     // count with no explanation. Detail (including which credential
     // failed and why) lives in the snapshot's `last_error`; this toast is
     // the pointer, one per failing server.
-    let failed: Vec<cosh::mcp::ServerSnapshot> = harness
+    let failed: Vec<crate::mcp::ServerSnapshot> = harness
         .mcp_snapshots()
         .into_iter()
-        .filter(|s| matches!(s.status, cosh::mcp::ServerStatus::Failed))
+        .filter(|s| matches!(s.status, crate::mcp::ServerStatus::Failed))
         .collect();
     if !failed.is_empty() {
-        use cosh::harness::events::ToastVariant;
+        use crate::harness::events::ToastVariant;
         let detail: String = failed
             .iter()
             .map(|s| {
@@ -374,26 +394,34 @@ pub(crate) async fn assemble(
     Ok(harness)
 }
 
+/// One tokio runtime for the whole process, shared by the agent loop, the
+/// Command-mode executor and background device sign-ins: the LSP
+/// singleton's ingestion/auto-discovery tasks and the language servers'
+/// transport tasks must outlive individual turns — a per-turn runtime
+/// would kill them (and, via `kill_on_drop`, the server processes) the
+/// moment a turn ends.
+pub static AGENT_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
+
 /// The shared process-wide runtime accessor: every loop-bearing assembly
-/// runs on THIS runtime (see [`super::agent_loop::AGENT_RUNTIME`] for
-/// why — LSP and MCP transports must outlive individual turns).
-pub(crate) fn agent_runtime() -> &'static tokio::runtime::Runtime {
-    super::agent_loop::AGENT_RUNTIME
-        .get_or_init(|| tokio::runtime::Runtime::new().expect("shared agent runtime"))
+/// runs on THIS runtime (see [`AGENT_RUNTIME`] for why — LSP and MCP
+/// transports must outlive individual turns).
+pub fn agent_runtime() -> &'static tokio::runtime::Runtime {
+    AGENT_RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("shared agent runtime"))
 }
 
 /// Run the assembled loop with the caller's queued-input choice: the main
 /// loop shares its queue with the TUI (`Some`), the pane runs one-input-
 /// per-turn (`None` — nobody pumps a pane queue, so a shared queue there
 /// would only strand messages).
-pub(crate) async fn run_assembled_loop(
+pub async fn run_assembled_loop(
     harness: &mut Harness,
     input: &str,
     event_tx: mpsc::UnboundedSender<HarnessEvent>,
     answer_rx: mpsc::UnboundedReceiver<
         Result<Vec<cosh_tools::question::types::AnswerItem>, String>,
     >,
-    perm_rx: mpsc::UnboundedReceiver<cosh::harness::PermissionAction>,
+    perm_rx: mpsc::UnboundedReceiver<crate::harness::PermissionAction>,
     stop_signal: Arc<AtomicBool>,
     queued_input: Option<QueuedInput>,
 ) {

@@ -216,7 +216,7 @@ pub(crate) fn load_agent(
                     // stay checkpoint-dir-relative — the loader re-verifies
                     // them after the subfolder join below, the same rule as
                     // the local-checkpoint path.
-                    expected_sha256: expected_sha256,
+                    expected_sha256,
                     progress: crate::hub::ProgressCallbacks::silent(),
                 })?;
                 resolved_revision = Some(installed.revision.clone());

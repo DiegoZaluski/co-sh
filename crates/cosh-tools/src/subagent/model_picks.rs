@@ -173,10 +173,10 @@ fn save_to_disk(path: &Path, picks: &BTreeMap<String, String>) -> Result<(), Str
     // file to the previous generation; harmless (the store degrades to "no
     // pick") but cheap to prevent.
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
     std::fs::rename(&tmp, path).map_err(|e| {
         // Leave the temp file for diagnosis; the next save replaces it.

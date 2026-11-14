@@ -4578,16 +4578,15 @@ mod tests {
                 let mut buf = Buffer::empty(area);
                 render(&mut buf, area, &mut state, &theme, 1.0 / 30.0);
                 for x in 0..40u16 {
-                    if let Some(cell) = buf.cell((x, 1)) {
-                        if cell
+                    if let Some(cell) = buf.cell((x, 1))
+                        && cell
                             .symbol()
                             .chars()
                             .next()
                             .is_some_and(|c| !c.is_whitespace())
                             && cell.style().fg != Some(base)
-                        {
-                            distinct = true;
-                        }
+                    {
+                        distinct = true;
                     }
                 }
             }
