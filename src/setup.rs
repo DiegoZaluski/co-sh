@@ -898,6 +898,12 @@ pub fn data_dir_override() -> PathBuf {
     proj.data_dir().to_path_buf()
 }
 
+/// [`config_dir`] for callers outside this module (`cosh paths`): the
+/// override is honored exactly like the data directory's.
+pub fn config_dir_override() -> PathBuf {
+    config_dir()
+}
+
 /// Full path to `setup.json`.
 fn setup_path() -> PathBuf {
     config_dir().join("setup.json")

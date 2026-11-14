@@ -2,6 +2,11 @@
 
 mod agent_colors;
 mod app;
+// The command-line surface lives at `src/cli` (app level, not TUI level); the
+// bin declares it with an explicit path because this file sits one directory
+// down, and the help screen needs the TUI's theme registry.
+#[path = "../cli/mod.rs"]
+mod cli;
 mod component;
 mod keymap;
 mod left_panel;
@@ -25,10 +30,49 @@ use cosh::weights;
 mod test;
 
 use app::App;
+use cli::style::Palette;
 use dotenvy::dotenv;
 
 #[tokio::main]
 async fn main() {
+    let invocation = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            eprintln!("cosh: {error}");
+            eprintln!("Run `cosh --help` for usage.");
+            std::process::exit(2);
+        }
+    };
+
+    match invocation {
+        cli::Invocation::Help(subject) => {
+            print!("{}", cli::help::render(subject.as_deref(), &Palette::load()));
+        }
+        cli::Invocation::Version => println!("{} {}", cli::NAME, cli::VERSION),
+        cli::Invocation::Paths => {
+            prepare_plain_command("cli_paths");
+            std::process::exit(cli::paths::run(&Palette::load()));
+        }
+        cli::Invocation::Update(options) => {
+            prepare_plain_command("cli_update");
+            std::process::exit(cli::update::run(options).await);
+        }
+        cli::Invocation::CheckKeyring => check_keyring(),
+        cli::Invocation::Launch(options) => run_tui(options).await,
+    }
+}
+
+/// Environment the non-TUI commands share. Logging is best effort: a log that
+/// cannot be opened must never block an update or a path lookup.
+fn prepare_plain_command(scope: &str) {
+    dotenv().ok();
+    if let Err(reason) = cosh::util::logger::try_init(scope) {
+        eprintln!("cosh: logging disabled: {reason}");
+    }
+}
+
+/// Start the interactive TUI.
+async fn run_tui(options: cli::LaunchOptions) {
     dotenv().ok();
 
     // Initialize debug file logger.
@@ -36,10 +80,16 @@ async fn main() {
     // server stderr logs in the same directory).
     cosh::util::logger::init("tui_main");
 
-    if std::env::args().any(|a| a == "--check-keyring") {
-        check_keyring();
-        return;
-    }
+    // Resolved BEFORE the terminal is initialized, so the messages are plain
+    // stderr lines: an unknown `-s` id exits, an empty `-c` falls back to
+    // Home with a hint.
+    let startup_session = match cli::resume::resolve(&options) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("cosh: {error}");
+            std::process::exit(1);
+        }
+    };
 
     crate::util::selection::init_clipboard();
     let cwd = std::env::current_dir()
@@ -47,6 +97,13 @@ async fn main() {
         .and_then(|p| p.to_str().map(String::from))
         .unwrap_or_else(|| "?".to_string());
     let mut app = App::new(cwd);
+    if let Some(session_id) = startup_session
+        && !app.open_session_at_startup(&session_id)
+    {
+        eprintln!(
+            "cosh: session {session_id} is already open in another cosh process — starting at home."
+        );
+    }
     app.show_welcome_toast();
     if let Err(e) = app.run() {
         eprintln!("Error: {e}");

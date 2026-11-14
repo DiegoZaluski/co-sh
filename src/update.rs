@@ -90,10 +90,14 @@ pub fn is_update_available(current_version: &str, tag: &str) -> bool {
     is_newer(current_version, &version_from_tag(tag))
 }
 
-/// Query the GitHub releases API for the latest published release.
-/// Returns `None` on any network/parse error (the banner simply stays
-/// hidden — a failed check must never degrade the app).
-pub async fn fetch_latest_release() -> Option<LatestRelease> {
+/// Latest published release, regardless of whether it is newer than the
+/// running build.
+///
+/// `cosh update` needs the tag even when it equals (or trails) the current
+/// version: the user may be pinning it deliberately. The boot check uses
+/// [`fetch_latest_release`], which applies the "is there anything new"
+/// filter on top of this one.
+pub async fn fetch_latest_tag() -> Option<LatestRelease> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let client = reqwest::Client::builder()
         .user_agent(concat!("cosh/", env!("CARGO_PKG_VERSION")))
@@ -120,60 +124,77 @@ pub async fn fetch_latest_release() -> Option<LatestRelease> {
     if release.draft.unwrap_or(false) || release.prerelease.unwrap_or(false) {
         return None;
     }
-    let version = version_from_tag(&tag);
-    if !is_update_available(env!("CARGO_PKG_VERSION"), &version) {
-        return None;
-    }
     Some(LatestRelease {
+        version: version_from_tag(&tag),
         url: release
             .html_url
             .unwrap_or_else(|| format!("https://github.com/{REPO}/releases")),
-        version,
         tag,
     })
 }
 
-/// The manual update command for the RUNNING OS, pinned to `latest_tag` —
-/// the exact documented install invocation (`curl … | bash` on Unix, the
-/// PowerShell one-liner on Windows), minus the relaunch tail the automated
-/// pipeline appends. Shown in the update toast so the user can update by
-/// hand from their own terminal (the ⧉ button copies it).
+/// Query the GitHub releases API for the latest published release.
+/// Returns `None` on any network/parse error (the banner simply stays
+/// hidden — a failed check must never degrade the app) and when the running
+/// version is already current.
+pub async fn fetch_latest_release() -> Option<LatestRelease> {
+    let release = fetch_latest_tag().await?;
+    is_update_available(env!("CARGO_PKG_VERSION"), &release.tag).then_some(release)
+}
+
+/// Normalize a user-supplied version (`0.2.3`, `v0.2.3`, `v0.2.3-rc1`) into
+/// the release-tag form (`v0.2.3`).
 ///
-/// The tag only enters a URL / env var inside the command string, and the
-/// toast hands it to the system clipboard — never to a shell. `spawn_update_
-/// pipeline`'s `is_valid_tag` still guards the automated path; here the tag
-/// is additionally validated so a malformed value can never render.
+/// Mirrors the installers' own check (`^v?[0-9]+\.[0-9]+\.[0-9]+(-.*)?$`), so
+/// a value that passes here is one `download.sh`/`download.ps1` accepts —
+/// the tag is then pinned into the installer URL and `COSH_VERSION`.
+pub fn normalize_tag(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let version = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    // The pre-release suffix is left to `is_valid_tag` below: only the
+    // numeric core is checked here.
+    let core = version.split('-').next().unwrap_or(version);
+    let mut parts = core.split('.');
+    let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    if [major, minor, patch]
+        .iter()
+        .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let tag = format!("v{version}");
+    is_valid_tag(&tag).then_some(tag)
+}
+
+/// The manual update command pinned to `latest_tag`, shown in the update
+/// toast so the user can update by hand from their own terminal (the ⧉
+/// button copies it).
+///
+/// It is the CLI's own command — the same code path the in-app updater runs,
+/// so there is exactly one documented way to install a release and no
+/// OS-specific shell one-liner to keep in sync with the installers.
 pub fn manual_update_command(latest_tag: &str) -> Option<String> {
     if !is_valid_tag(latest_tag) {
         log::warn!("manual update command: invalid release tag {latest_tag:?}");
         return None;
     }
-    let script_url = if cfg!(windows) {
-        format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.ps1")
-    } else {
-        format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.sh")
-    };
-    if cfg!(windows) {
-        Some(format!(
-            "iwr -Uri \"{script_url}\" -OutFile download.ps1; .\\download.ps1"
-        ))
-    } else {
-        Some(format!(
-            "curl -fsSL {script_url} | COSH_VERSION={latest_tag} bash"
-        ))
-    }
+    Some(format!("cosh update {latest_tag}"))
 }
 
-/// Fire-and-forget the OS install pipeline (the documented manual install:
-/// `curl … | bash` / `download.ps1`) pinned to `latest_tag`.
+/// Fire-and-forget the in-app update: start this same binary as
+/// `cosh update <tag> --yes --relaunch`.
 ///
-/// The script downloads the release, replaces the binary in place and
-/// RELAUNCHES cosh when it finishes. This function only spawns it (fully
-/// detached: own process group, no console window) and returns immediately —
-/// the caller then closes the TUI, and the pipeline's relaunch brings the
-/// updated app back up. No UI feedback is needed: the terminal visibly
-/// closes and reopens. Errors (failed spawn, invalid tag) are just logged;
-/// there is no in-app retry surface.
+/// The command line is the single implementation of "install a release"
+/// (`crate::cli::update`): it downloads the pinned installer script, runs it
+/// with `COSH_VERSION`/`COSH_VARIANT` set, and — with `--relaunch` — starts
+/// cosh again on the new image. This function only starts that process
+/// detached (own process group on Unix, no console window on Windows) and
+/// returns so the caller can close the TUI: the terminal visibly closes and
+/// reopens when the update lands. Errors (failed spawn, invalid tag) are just
+/// logged; there is no in-app retry surface.
 pub fn spawn_update_pipeline(latest_tag: &str) {
     // The tag lands on a shell command line and inside download URLs:
     // validate before anything runs (defense-in-depth; the release check
@@ -183,98 +204,40 @@ pub fn spawn_update_pipeline(latest_tag: &str) {
         return;
     }
 
-    // Path of the running binary: the pipeline relaunches it after the
-    // install replaces it on disk.
-    let Some(current_exe) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
-    else {
+    let Some(current_exe) = std::env::current_exe().ok() else {
         log::error!("update pipeline: cannot resolve the running executable path");
         return;
     };
 
-    let result = if cfg!(windows) {
-        // Windows: curl the pinned PowerShell installer to a private temp
-        // file, run it, record its exit code in an env var BEFORE the
-        // unconditional cleanup `del` (a trailing cleanup command would
-        // otherwise become cmd's exit status and mask a failure), relaunch
-        // cosh, then exit with the recorded code. CREATE_NO_WINDOW only:
-        // DETACHED_PROCESS is mutually exclusive with it and the combined
-        // bitmask can make CreateProcess fail outright.
-        #[cfg(windows)]
-        {
-            let script_url =
-                format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.ps1");
-            // Process-unique temp name: a predictable shared path would let
-            // a local process pre-create or swap the script between the
-            // download and its execution under -ExecutionPolicy Bypass.
-            let script =
-                std::env::temp_dir().join(format!("cosh-update-{}.ps1", std::process::id()));
-            let cmd = format!(
-                "curl.exe -fsSL -o \"{}\" \"{script_url}\" && powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" & set \"COSH_UPDATE_RC=!ERRORLEVEL!\" & del /q \"{}\" & start \"\" \"{current_exe}\" & exit /b !COSH_UPDATE_RC!",
-                script.display(),
-                script.display(),
-                script.display(),
-            );
-            use std::os::windows::process::CommandExt;
-            // raw_arg, NOT args(): the std quotes each `.args()` argument
-            // with the MSVCRT rules -- the whole one-liner gets outer quotes
-            // and every embedded double quote becomes backslash-quote -- but
-            // cmd.exe parses the command line with its OWN rules (backslash
-            // is literal, a double quote just toggles in-quote state). Routed
-            // through `.args()`, those backslash-escaped quotes survive as
-            // LITERAL quote characters, so curl.exe receives an invalid
-            // quoted output path like C:\...\cosh-update-N.ps1 wrapped in
-            // real quotes; the download fails, the && chain short-circuits
-            // and the installer never runs -- all invisible under
-            // CREATE_NO_WINDOW. raw_arg puts the string VERBATIM on the
-            // command line, which is what cmd.exe expects for a /C script.
-            std::process::Command::new("cmd")
-                // /V:ON enables DELAYED variable expansion: without it cmd
-                // expands %VAR% at PARSE time (the whole one-liner is read
-                // at once), so the recorded code would be the shell's
-                // startup errorlevel (0) instead of the install's exit
-                // code. With /V:ON, !VAR! expands at execution time.
-                .raw_arg("/V:ON")
-                .raw_arg("/C")
-                .raw_arg(&cmd)
-                .creation_flags(0x0800_0000)
-                .spawn()
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = current_exe;
-            Err(std::io::Error::other("windows-only path"))
-        }
-    } else {
-        // Unix: run the pinned installer with pipefail (a pipeline's exit
-        // status is its LAST command — without pipefail a failed download
-        // would feed empty stdin to bash, exit 0 and report success), then
-        // relaunch cosh on the freed terminal.
-        #[cfg(unix)]
-        {
-            let script_url =
-                format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.sh");
-            let script = format!(
-                "set -o pipefail; curl -fsSL {script_url} | COSH_VERSION={latest_tag} bash; exec {current_exe}"
-            );
-            use std::os::unix::process::CommandExt;
-            std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&script)
-                .process_group(0)
-                .spawn()
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = current_exe;
-            Err(std::io::Error::other("unix-only path"))
-        }
-    };
+    let mut command = std::process::Command::new(&current_exe);
+    command
+        .arg("update")
+        .arg(latest_tag)
+        .arg("--yes")
+        .arg("--relaunch")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
 
-    match result {
+    // Detach from the terminal the TUI is about to restore: its own process
+    // group on Unix (no Ctrl-C fan-out while the installer runs), and no
+    // console window on Windows. CREATE_NO_WINDOW only: DETACHED_PROCESS is
+    // mutually exclusive with it and the combined bitmask can make
+    // CreateProcess fail outright.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+
+    match command.spawn() {
         Ok(child) => log::info!(
-            "update pipeline spawned (pid {}, target {latest_tag}); closing cosh — the pipeline relaunches it when done",
+            "update pipeline spawned (pid {}, target {latest_tag}); closing cosh — `cosh update` relaunches it when done",
             child.id()
         ),
         Err(err) => log::error!("failed to start update pipeline: {err}"),
@@ -293,6 +256,20 @@ mod tests {
         assert!(!is_valid_tag("v1; rm -rf /"));
         assert!(!is_valid_tag("v1 $(echo pwn)"));
         assert!(!is_valid_tag("v1\n0.2"));
+    }
+
+    #[test]
+    fn normalize_tag_pins_the_release_form() {
+        assert_eq!(normalize_tag("0.2.3"), Some("v0.2.3".into()));
+        assert_eq!(normalize_tag("v0.2.3"), Some("v0.2.3".into()));
+        assert_eq!(normalize_tag(" v0.2.3-rc1 "), Some("v0.2.3-rc1".into()));
+    }
+
+    #[test]
+    fn normalize_tag_rejects_what_the_installer_would_not_accept() {
+        for raw in ["", "0.2", "0.2.3.4", "v0.2.x", "latest", "0.2.3; rm -rf /"] {
+            assert_eq!(normalize_tag(raw), None, "must reject {raw:?}");
+        }
     }
 
     #[test]

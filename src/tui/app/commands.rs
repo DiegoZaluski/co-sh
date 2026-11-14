@@ -945,9 +945,9 @@ impl App {
                 });
             }
             BannerAction::StartUpdate => {
-                // Fire-and-forget: the pipeline downloads/installs and
-                // RELAUNCHES cosh when it finishes, so the very next step is
-                // to close this TUI. No toast, no spinner, no in-app state —
+                // Fire-and-forget: the pipeline runs `cosh update` detached
+                // and RELAUNCHES cosh when it finishes, so the very next step
+                // is to close this TUI. No toast, no spinner, no in-app state —
                 // the terminal closing and reopening IS the feedback.
                 crate::update::spawn_update_pipeline(&tag);
                 self.should_quit = true;
@@ -957,15 +957,15 @@ impl App {
 
     /// Click on the session footer's update button (`v0.1.2` in
     /// `v0.1.1 → v0.1.2`): run the SAME install pipeline the Home banner's
-    /// "Update version" button uses — `spawn_update_pipeline` downloads the
-    /// release with the pinned installer script, replaces the binary and
-    /// relaunches cosh; closing the TUI is the whole feedback.
+    /// "Update version" button uses — `spawn_update_pipeline` hands the tag
+    /// to `cosh update`, which installs that exact release and relaunches
+    /// cosh; closing the TUI is the whole feedback.
     pub(super) fn click_footer_update(&mut self) {
         // The RAW release tag (`v0.1.2`) straight from the GitHub check —
         // the same value the Home banner passes, never a reconstruction:
-        // `spawn_update_pipeline` pins both the installer-script URL and the
-        // `COSH_VERSION` to this tag, so a tag published without the `v`
-        // prefix must survive verbatim. It is validated again inside.
+        // `spawn_update_pipeline` passes it to `cosh update` as the target
+        // version, so a tag published without the `v` prefix must survive
+        // verbatim. It is validated again inside.
         if let Some(tag) = self.update_latest_tag.clone() {
             crate::update::spawn_update_pipeline(&tag);
             self.should_quit = true;
@@ -996,7 +996,7 @@ impl App {
                                 title: Some(format!("Update to v{}", release.version)),
                                 message: command.clone(),
                                 variant: ToastVariant::Info,
-                                // Long enough to read a curl one-liner.
+                                // Long enough to read the whole command.
                                 duration_ms: 50_000,
                             },
                             command,
@@ -1116,6 +1116,25 @@ impl App {
     ///
     /// Returns `false` (with the toast shown) when the target session is
     /// locked by another process; `true` on a completed switch.
+    /// Open a session before the first frame — the `cosh -c` / `cosh -s`
+    /// startup path.
+    ///
+    /// Runs the sidebar switch (lock, persist the outgoing session, restore
+    /// the incoming one) plus the two steps a startup has and an interactive
+    /// switch does not: the session's own model becomes the live selection,
+    /// and the prompt takes focus so the user can type immediately.
+    ///
+    /// Returns `false` when another cosh process holds the session open; the
+    /// caller reports that and leaves the user at home.
+    pub fn open_session_at_startup(&mut self, session_id: &str) -> bool {
+        if !self.switch_session_locked(session_id) {
+            return false;
+        }
+        self.restore_current_session_model();
+        self.prompt_view.focus();
+        true
+    }
+
     pub(super) fn switch_session_locked(&mut self, session_id: &str) -> bool {
         // Finalize stale compaction lines on the OLD session BEFORE the
         // switch: `switch_to_session` persists it, and a persisted session

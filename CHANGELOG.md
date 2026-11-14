@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A real command line in front of the TUI: `-c/--continue` reopens the
+  session most recently worked in for this directory, `-s/--session <id>`
+  opens a chosen one, `-v/--version` prints the version and `-h/--help`
+  (also `cosh help [command]`) prints a themed help page per command,
+  with the logo's "O" mark and the running version in its top-right
+  corner.
+  `cosh paths` prints the data, config, log, session and binary paths for
+  other tools. Usage errors exit with status 2.
+
 - Revert, Copy and Fork now answer for `/agents` pane messages, routed by
   what backs the pane. A cosh pane runs the store's branch machinery over
   its own session, so a revert really truncates what the next turn sends
@@ -29,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session's recoverable input history, without affecting the main agent's
   flow or transcript. The list belongs to the session, so it survives a
   restart and a session switch.
+
+### Changed
+
+- Updates use one command everywhere: `cosh update [version] [--yes]`
+  installs a release through the official installer for this OS and
+  variant, and the in-app update button and the copied manual command now
+  point at it instead of the raw `curl … | bash` one-liners.
 
 ### Fixed
 
